@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+clinic.db
+frontend/node_modules
+frontend/dist
+clinic_management_api.egg-info

@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: #f6f3ec;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    color: #1f2523;
+    background:
+      linear-gradient(rgba(31, 37, 35, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(31, 37, 35, 0.025) 1px, transparent 1px),
+      #f6f3ec;
+    background-size: 28px 28px;
+    font-feature-settings: "kern";
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
+  }
+}
+
+@layer components {
+  .field {
+    @apply w-full rounded-md border border-ink/10 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition placeholder:text-ink/35 focus:border-clinic/50 focus:ring-4 focus:ring-clinic/10;
+  }
+
+  .form-label {
+    @apply mb-4 block text-sm font-semibold text-ink/70;
+  }
+
+  .form-label .field {
+    @apply mt-2;
+  }
+
+  .button-primary {
+    @apply inline-flex items-center justify-center rounded-md bg-ink px-4 py-2.5 text-sm font-semibold text-paper transition hover:bg-clinic;
+  }
+
+  .button-secondary {
+    @apply inline-flex items-center justify-center rounded-md border border-ink/10 bg-paper px-4 py-2.5 text-sm font-semibold text-ink transition hover:border-clinic/40 hover:text-clinic;
+  }
+}
