@@ -332,6 +332,27 @@ def test_admin_analytics_endpoints(client: TestClient):
     assert revenue_data["data"][0]["s6_clients"] == 2
 
 
+def test_bootstrap_endpoint_requires_token_and_seeds(client: TestClient):
+    from app.core.config import settings
+
+    settings.bootstrap_token = "bootstrap-secret"
+
+    unauthorized = client.post("/internal/bootstrap-demo")
+    assert unauthorized.status_code == 401
+
+    bootstrapped = client.post(
+        "/internal/bootstrap-demo",
+        headers={"x-bootstrap-token": "bootstrap-secret"},
+    )
+    assert bootstrapped.status_code == 200
+    assert bootstrapped.json()["message"] == "Bootstrap complete"
+
+    login = client.post("/auth/login", json={"email": "admin@example.com", "password": "password123"})
+    assert login.status_code == 200
+
+    settings.bootstrap_token = ""
+
+
 def test_consultant_dashboard_scope_and_payload(client: TestClient):
     admin_headers = auth_headers(client, "admin@example.com")
     consultant_headers = auth_headers(client, "consultant@example.com")

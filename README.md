@@ -82,13 +82,22 @@ For both platforms, this setup is suitable for `staging / demo`. Before producti
 
 ### Seed Render Database
 
-After the first deploy, open the Render shell for `clinic-api` and run:
+If your Render plan supports shell, open the Render shell for `clinic-api` and run:
 
 ```bash
 python -m app.seed
 ```
 
 The seed is idempotent for the demo users. If `admin@example.com` already exists, it exits without duplicating demo data.
+
+If your Render plan does not support shell, use the bootstrap endpoint once:
+
+```bash
+curl -X POST https://your-backend-domain.onrender.com/internal/bootstrap-demo \
+  -H "x-bootstrap-token: <BOOTSTRAP_TOKEN>"
+```
+
+`BOOTSTRAP_TOKEN` comes from the `clinic-api` environment variables in Render. After bootstrap succeeds and login works, clear `BOOTSTRAP_TOKEN` and redeploy to disable the endpoint again.
 
 ### Smoke Test Deployed API
 

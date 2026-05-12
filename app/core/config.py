@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./clinic.db"
     secret_key: str = "change-me-in-production"
+    bootstrap_token: str = ""
     access_token_expire_minutes: int = 60 * 24
     algorithm: str = "HS256"
     allowed_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
