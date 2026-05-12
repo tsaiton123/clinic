@@ -80,6 +80,36 @@ DATABASE_URL=<railway-postgres-url> .venv/bin/python -m app.seed
 
 For both platforms, this setup is suitable for `staging / demo`. Before production, replace demo accounts, tighten CORS, rotate secrets, and add backup and monitoring.
 
+### Seed Render Database
+
+After the first deploy, open the Render shell for `clinic-api` and run:
+
+```bash
+python -m app.seed
+```
+
+The seed is idempotent for the demo users. If `admin@example.com` already exists, it exits without duplicating demo data.
+
+### Smoke Test Deployed API
+
+From your local machine:
+
+```bash
+.venv/bin/python scripts/smoke_test.py https://your-backend-domain.onrender.com
+```
+
+This verifies:
+
+- `GET /health`
+- admin login
+- consultant login
+- create client
+- update stage
+- create follow-up
+- send notification
+- admin analytics endpoints
+- consultant dashboard, client list, notification inbox
+
 ### Frontend Local Env
 
 For local frontend development:
