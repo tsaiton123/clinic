@@ -14,29 +14,50 @@ from app.models.stage_log import StageLog
 from app.models.user import User
 
 
+def get_or_create_user(db, *, name: str, email: str, password: str, role: UserRole) -> User:
+    user = db.scalar(select(User).where(User.email == email))
+    if user:
+        user.name = name
+        user.password_hash = hash_password(password)
+        user.role = role
+        user.status = UserStatus.active
+        return user
+
+    user = User(
+        name=name,
+        email=email,
+        password_hash=hash_password(password),
+        role=role,
+        status=UserStatus.active,
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
 def run() -> None:
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if db.scalar(select(User).where(User.email == "admin@example.com")):
-            return
-
-        admin = User(
+        admin = get_or_create_user(
+            db,
             name="王院長",
             email="admin@example.com",
-            password_hash=hash_password("password123"),
+            password="password123",
             role=UserRole.admin,
-            status=UserStatus.active,
         )
-        consultant = User(
+        consultant = get_or_create_user(
+            db,
             name="陳咨詢師",
             email="consultant@example.com",
-            password_hash=hash_password("password123"),
+            password="password123",
             role=UserRole.consultant,
-            status=UserStatus.active,
         )
-        db.add_all([admin, consultant])
-        db.flush()
+
+        existing_client = db.scalar(select(Client).where(Client.email == "wang@example.com"))
+        if existing_client:
+            db.commit()
+            return
 
         client = Client(
             name="王小姐",
