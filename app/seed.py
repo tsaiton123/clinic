@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -12,6 +12,7 @@ from app.models.follow_up_log import FollowUpLog
 from app.models.notification import Notification
 from app.models.stage_log import StageLog
 from app.models.user import User
+from app.services import calculate_age
 
 
 def get_or_create_user(db, *, name: str, email: str, password: str, role: UserRole) -> User:
@@ -65,7 +66,8 @@ def run() -> None:
             line_id="wang_line",
             email="wang@example.com",
             gender="female",
-            age=35,
+            birth_date=date(1990, 5, 1),
+            age=calculate_age(date(1990, 5, 1)),
             source="朋友介紹",
             interested_treatment="植牙",
             initial_need="想了解全口重建方案",

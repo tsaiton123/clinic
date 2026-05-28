@@ -1,4 +1,5 @@
 export type Role = "admin" | "consultant";
+export type UserStatus = "active" | "inactive";
 export type Stage = "S1" | "S2" | "S3" | "S4" | "S5" | "S6";
 export type ClientStatus = "active" | "paused" | "completed" | "lost" | "archived";
 export type ConsultationStatus = "尚未回覆" | "有興趣" | "暫緩" | "失聯";
@@ -10,6 +11,12 @@ export interface User {
   name: string;
   email: string;
   role: Role;
+}
+
+export interface ManagedUser extends User {
+  status: UserStatus;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AssignedConsultant {
@@ -34,6 +41,7 @@ export interface ClientListItem {
 export interface ClientDetail extends ClientListItem {
   email: string | null;
   gender: string | null;
+  birth_date: string | null;
   age: number | null;
   source: string | null;
   interested_treatment: string | null;
@@ -55,7 +63,7 @@ export interface ClientPayload {
   line_id?: string;
   email?: string;
   gender?: string;
-  age?: number;
+  birth_date?: string;
   source?: string;
   interested_treatment?: string;
   initial_need?: string;

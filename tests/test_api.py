@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,9 +8,11 @@ from sqlalchemy.orm import sessionmaker
 from app.core.database import Base, get_db
 from app.core.security import hash_password
 from app.main import app
+from app.models.client import Client
 from app.models.enums import UserRole, UserStatus
 from app.models.stage_log import StageLog
 from app.models.user import User
+from app.services import calculate_age
 
 
 engine = create_engine(
@@ -110,6 +112,26 @@ def test_client_stage_and_follow_up_flow(client: TestClient):
         },
     )
     assert follow_up.status_code == 201
+    follow_up_id = follow_up.json()["id"]
+
+    updated_follow_up = client.put(
+        f"/follow-ups/{follow_up_id}",
+        headers=admin_headers,
+        json={
+            "contact_method": "phone",
+            "content": "已改成電話追蹤",
+            "client_response": "可再安排下週確認",
+            "next_action": "下週再次致電",
+            "next_follow_up_at": overdue_at,
+            "need_admin_support": True,
+        },
+    )
+    assert updated_follow_up.status_code == 200
+
+    follow_up_logs = client.get(f"/clients/{client_id}/follow-ups", headers=admin_headers)
+    assert follow_up_logs.status_code == 200
+    assert follow_up_logs.json()["data"][0]["contact_method"] == "phone"
+    assert follow_up_logs.json()["data"][0]["need_admin_support"] is True
 
     overdue = client.get("/follow-ups/overdue?days=1", headers=admin_headers)
     assert overdue.status_code == 200
@@ -137,6 +159,41 @@ def test_consultant_can_only_see_own_clients(client: TestClient):
 
     forbidden = client.get(f"/clients/{other}", headers=consultant_headers)
     assert forbidden.status_code == 403
+
+
+def test_birth_date_auto_calculates_age(client: TestClient):
+    admin_headers = auth_headers(client, "admin@example.com")
+    birth_date = date(1990, 5, 20)
+
+    created = client.post(
+        "/clients",
+        headers=admin_headers,
+        json={
+            "name": "Birthday Client",
+            "assigned_consultant_id": 2,
+            "birth_date": birth_date.isoformat(),
+        },
+    )
+    assert created.status_code == 201
+    client_id = created.json()["id"]
+
+    detail = client.get(f"/clients/{client_id}", headers=admin_headers)
+    assert detail.status_code == 200
+    assert detail.json()["birth_date"] == birth_date.isoformat()
+    assert detail.json()["age"] == calculate_age(birth_date)
+
+    updated_birth_date = date(2000, 5, 20)
+    updated = client.put(
+        f"/clients/{client_id}",
+        headers=admin_headers,
+        json={"birth_date": updated_birth_date.isoformat()},
+    )
+    assert updated.status_code == 200
+
+    updated_detail = client.get(f"/clients/{client_id}", headers=admin_headers)
+    assert updated_detail.status_code == 200
+    assert updated_detail.json()["birth_date"] == updated_birth_date.isoformat()
+    assert updated_detail.json()["age"] == calculate_age(updated_birth_date)
 
 
 def test_decision_barriers_and_analytics(client: TestClient):
@@ -183,6 +240,45 @@ def test_decision_barriers_and_analytics(client: TestClient):
     ]
 
 
+def test_funnel_supports_datetime_range_filter(client: TestClient):
+    admin_headers = auth_headers(client, "admin@example.com")
+
+    created_early = client.post(
+        "/clients",
+        headers=admin_headers,
+        json={"name": "Early Client", "assigned_consultant_id": 2, "current_stage": "S2"},
+    )
+    assert created_early.status_code == 201
+    early_client_id = created_early.json()["id"]
+
+    db = TestingSessionLocal()
+    early_client = db.get(Client, early_client_id)
+    assert early_client is not None
+    early_client.created_at = datetime.now(UTC) - timedelta(days=2)
+    db.commit()
+    db.close()
+
+    recent_cutoff = datetime.now(UTC) - timedelta(minutes=1)
+
+    created_recent = client.post(
+        "/clients",
+        headers=admin_headers,
+        json={"name": "Recent Client", "assigned_consultant_id": 2, "current_stage": "S5"},
+    )
+    assert created_recent.status_code == 201
+
+    filtered = client.get(
+        "/analytics/funnel",
+        params={"start_date": recent_cutoff.isoformat()},
+        headers=admin_headers,
+    )
+    assert filtered.status_code == 200
+    filtered_counts = {item["stage"]: item["count"] for item in filtered.json()["stages"]}
+    assert filtered_counts["S1"] == 0
+    assert filtered_counts["S2"] == 0
+    assert filtered_counts["S5"] == 1
+
+
 def test_notifications_admin_send_and_inbox(client: TestClient):
     admin_headers = auth_headers(client, "admin@example.com")
     consultant_headers = auth_headers(client, "consultant@example.com")
@@ -222,6 +318,62 @@ def test_notifications_admin_send_and_inbox(client: TestClient):
     read_inbox = client.get("/notifications?status=read", headers=consultant_headers)
     assert read_inbox.status_code == 200
     assert read_inbox.json()["data"][0]["status"] == "read"
+
+
+def test_admin_user_management_flow(client: TestClient):
+    admin_headers = auth_headers(client, "admin@example.com")
+    consultant_headers = auth_headers(client, "consultant@example.com")
+
+    forbidden = client.get("/users", headers=consultant_headers)
+    assert forbidden.status_code == 403
+
+    created = client.post(
+        "/users",
+        headers=admin_headers,
+        json={
+            "name": "New Consultant",
+            "email": "new-consultant@example.com",
+            "role": "consultant",
+            "password": "password456",
+            "status": "active",
+        },
+    )
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+
+    listing = client.get("/users", headers=admin_headers)
+    assert listing.status_code == 200
+    assert any(item["email"] == "new-consultant@example.com" for item in listing.json()["data"])
+
+    updated = client.put(
+        f"/users/{user_id}",
+        headers=admin_headers,
+        json={
+            "name": "Renamed Consultant",
+            "status": "inactive",
+        },
+    )
+    assert updated.status_code == 200
+
+    reset = client.put(
+        f"/users/{user_id}/password",
+        headers=admin_headers,
+        json={"password": "newpassword456"},
+    )
+    assert reset.status_code == 200
+
+    relogin = client.post(
+        "/auth/login",
+        json={"email": "new-consultant@example.com", "password": "newpassword456"},
+    )
+    assert relogin.status_code == 401
+
+    self_deactivate = client.put(
+        "/users/1",
+        headers=admin_headers,
+        json={"status": "inactive"},
+    )
+    assert self_deactivate.status_code == 400
 
 
 def test_admin_notes_flow_and_consultant_visibility(client: TestClient):

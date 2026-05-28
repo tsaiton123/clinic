@@ -14,10 +14,12 @@ import type {
   ContactMethod,
   DecisionBarrier,
   FollowUpItem,
+  ManagedUser,
   NotificationListResponse,
   Stage,
   StageLogItem,
   User,
+  UserStatus,
 } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -58,6 +60,41 @@ export async function login(email: string, password: string) {
 
 export async function me(token: string) {
   return request<User>("/auth/me", {}, token);
+}
+
+export async function getUsers(token: string) {
+  return request<{ data: ManagedUser[] }>("/users", {}, token);
+}
+
+export async function createUser(
+  token: string,
+  payload: { name: string; email: string; role: "admin" | "consultant"; password: string; status?: UserStatus },
+) {
+  return request<{ id: number; message: string }>(
+    "/users",
+    { method: "POST", body: JSON.stringify(payload) },
+    token,
+  );
+}
+
+export async function updateUser(
+  token: string,
+  userId: number,
+  payload: { name?: string; email?: string; role?: "admin" | "consultant"; status?: UserStatus },
+) {
+  return request<{ message: string }>(
+    `/users/${userId}`,
+    { method: "PUT", body: JSON.stringify(payload) },
+    token,
+  );
+}
+
+export async function resetUserPassword(token: string, userId: number, password: string) {
+  return request<{ message: string }>(
+    `/users/${userId}/password`,
+    { method: "PUT", body: JSON.stringify({ password }) },
+    token,
+  );
 }
 
 export async function getConsultantDashboard(token: string) {
@@ -165,6 +202,25 @@ export async function createFollowUp(
   );
 }
 
+export async function updateFollowUp(
+  token: string,
+  followUpId: number,
+  payload: {
+    contact_method: ContactMethod;
+    content: string;
+    client_response?: string;
+    next_action?: string;
+    next_follow_up_at?: string;
+    need_admin_support?: boolean;
+  },
+) {
+  return request<{ message: string }>(
+    `/follow-ups/${followUpId}`,
+    { method: "PUT", body: JSON.stringify(payload) },
+    token,
+  );
+}
+
 export async function getStageLogs(token: string, clientId: number) {
   return request<{ data: StageLogItem[] }>(`/clients/${clientId}/stage-logs`, {}, token);
 }
@@ -245,12 +301,28 @@ function consultantQuery(consultantId?: number | null) {
   return consultantId ? `?consultant_id=${consultantId}` : "";
 }
 
+function withAnalyticsQuery(
+  consultantId?: number | null,
+  range?: { startDate?: string; endDate?: string },
+) {
+  const search = new URLSearchParams();
+  if (consultantId) search.set("consultant_id", String(consultantId));
+  if (range?.startDate) search.set("start_date", range.startDate);
+  if (range?.endDate) search.set("end_date", range.endDate);
+  const suffix = search.toString();
+  return suffix ? `?${suffix}` : "";
+}
+
 export async function getAnalyticsOverview(token: string, consultantId?: number | null) {
   return request<AnalyticsOverview>(`/analytics/overview${consultantQuery(consultantId)}`, {}, token);
 }
 
-export async function getAnalyticsFunnel(token: string, consultantId?: number | null) {
-  return request<AnalyticsFunnel>(`/analytics/funnel${consultantQuery(consultantId)}`, {}, token);
+export async function getAnalyticsFunnel(
+  token: string,
+  consultantId?: number | null,
+  range?: { startDate?: string; endDate?: string },
+) {
+  return request<AnalyticsFunnel>(`/analytics/funnel${withAnalyticsQuery(consultantId, range)}`, {}, token);
 }
 
 export async function getAnalyticsConsultants(token: string) {

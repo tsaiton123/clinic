@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -16,6 +16,7 @@ class Client(Base):
     line_id: Mapped[str | None] = mapped_column(String(120), index=True)
     email: Mapped[str | None] = mapped_column(String(255))
     gender: Mapped[str | None] = mapped_column(String(40))
+    birth_date: Mapped[date | None] = mapped_column(Date)
     age: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str | None] = mapped_column(String(120), index=True)
     interested_treatment: Mapped[str | None] = mapped_column(String(255))

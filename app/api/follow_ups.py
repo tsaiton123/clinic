@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -17,6 +17,8 @@ from app.schemas import (
     FollowUpDueResponse,
     FollowUpItem,
     FollowUpResponse,
+    FollowUpUpdate,
+    MessageResponse,
 )
 from app.services import days_overdue, ensure_client_access, latest_follow_up_rows
 
@@ -72,6 +74,27 @@ def list_follow_ups(
             for log in logs
         ]
     )
+
+
+@router.put("/follow-ups/{follow_up_id}", response_model=MessageResponse)
+def update_follow_up(
+    follow_up_id: int,
+    payload: FollowUpUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MessageResponse:
+    follow_up = db.scalar(
+        select(FollowUpLog)
+        .options(selectinload(FollowUpLog.client))
+        .where(FollowUpLog.id == follow_up_id)
+    )
+    if follow_up is None:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    ensure_client_access(db, current_user, follow_up.client_id)
+    for key, value in payload.model_dump().items():
+        setattr(follow_up, key, value)
+    db.commit()
+    return MessageResponse(message="Follow-up updated successfully")
 
 
 @router.get("/follow-ups/today", response_model=FollowUpDueResponse)

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import Select, func, or_, select
@@ -114,3 +114,11 @@ def days_overdue(due_at: datetime, now: datetime | None = None) -> int:
     if due_at.tzinfo is None:
         due_at = due_at.replace(tzinfo=UTC)
     return max((now.date() - due_at.date()).days, 0)
+
+
+def calculate_age(birth_date: date, today: date | None = None) -> int:
+    today = today or datetime.now(UTC).date()
+    years = today.year - birth_date.year
+    if (today.month, today.day) < (birth_date.month, birth_date.day):
+        years -= 1
+    return max(years, 0)

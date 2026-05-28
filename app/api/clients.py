@@ -21,6 +21,7 @@ from app.schemas import (
 )
 from app.services import (
     apply_client_filters,
+    calculate_age,
     ensure_client_access,
     latest_follow_up_for_client,
     scoped_clients_query,
@@ -104,6 +105,9 @@ def create_client(
 
     client_data = payload.model_dump(exclude_unset=True)
     client_data["assigned_consultant_id"] = assigned_consultant_id
+    if "birth_date" in client_data:
+        birth_date = client_data["birth_date"]
+        client_data["age"] = calculate_age(birth_date) if birth_date is not None else None
     client = Client(**client_data)
     db.add(client)
     db.flush()
@@ -143,6 +147,9 @@ def update_client(
             update_data.pop("assigned_consultant_id")
         else:
             validate_consultant(db, update_data["assigned_consultant_id"])
+    if "birth_date" in update_data:
+        birth_date = update_data["birth_date"]
+        update_data["age"] = calculate_age(birth_date) if birth_date is not None else None
     for key, value in update_data.items():
         setattr(client, key, value)
     db.commit()

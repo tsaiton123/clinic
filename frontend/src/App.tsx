@@ -16,8 +16,9 @@ import {
   Search,
   ShieldCheck,
   UserRound,
+  Pencil,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   archiveClient,
@@ -41,14 +42,19 @@ import {
   getNotifications,
   getStagnantClients,
   getStageLogs,
+  getUsers,
   login,
   markNotificationRead,
   me,
+  resetUserPassword,
   restoreClient,
   updateAdminNote,
   updateBarrier,
   updateClient,
   updateClientStage,
+  updateFollowUp,
+  updateUser,
+  createUser,
 } from "./api";
 import type {
   AdminNoteItem,
@@ -66,10 +72,12 @@ import type {
   ContactMethod,
   DecisionBarrier,
   FollowUpItem,
+  ManagedUser,
   NotificationItem,
   Stage,
   StageLogItem,
   User,
+  UserStatus,
 } from "./types";
 
 const stages: Stage[] = ["S1", "S2", "S3", "S4", "S5", "S6"];
@@ -115,15 +123,171 @@ function classNames(...values: Array<string | false | undefined>) {
   return values.filter(Boolean).join(" ");
 }
 
+function calculateAgeFromBirthDate(value: string | null | undefined) {
+  if (!value) return null;
+  const birthDate = new Date(value);
+  if (Number.isNaN(birthDate.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  const dayDiff = today.getDate() - birthDate.getDate();
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) {
+    age -= 1;
+  }
+  return Math.max(age, 0);
+}
+
+function zodiacFromBirthDate(value: string | null | undefined) {
+  if (!value) return null;
+  const birthDate = new Date(value);
+  if (Number.isNaN(birthDate.getTime())) return null;
+  const month = birthDate.getMonth() + 1;
+  const day = birthDate.getDate();
+
+  if ((month === 3 && day >= 21) || (month === 4 && day <= 19)) return "牡羊座";
+  if ((month === 4 && day >= 20) || (month === 5 && day <= 20)) return "金牛座";
+  if ((month === 5 && day >= 21) || (month === 6 && day <= 21)) return "雙子座";
+  if ((month === 6 && day >= 22) || (month === 7 && day <= 22)) return "巨蟹座";
+  if ((month === 7 && day >= 23) || (month === 8 && day <= 22)) return "獅子座";
+  if ((month === 8 && day >= 23) || (month === 9 && day <= 22)) return "處女座";
+  if ((month === 9 && day >= 23) || (month === 10 && day <= 23)) return "天秤座";
+  if ((month === 10 && day >= 24) || (month === 11 && day <= 22)) return "天蠍座";
+  if ((month === 11 && day >= 23) || (month === 12 && day <= 21)) return "射手座";
+  if ((month === 12 && day >= 22) || (month === 1 && day <= 19)) return "摩羯座";
+  if ((month === 1 && day >= 20) || (month === 2 && day <= 18)) return "水瓶座";
+  return "雙魚座";
+}
+
+function funnelRangeFromDays(days: number) {
+  const safeDays = Math.max(1, Math.floor(days || 30));
+  const end = new Date();
+  const start = new Date(end.getTime() - safeDays * 24 * 60 * 60 * 1000);
+  return {
+    start: toDateTimeInputValue(start.toISOString()),
+    end: toDateTimeInputValue(end.toISOString()),
+  };
+}
+
+function defaultFunnelRange() {
+  return funnelRangeFromDays(30);
+}
+
+function isValidFunnelRange(range: { start: string; end: string }) {
+  return !(range.start && range.end && range.start > range.end);
+}
+
+type AppView = "dashboard" | "clients" | "notifications" | "analytics" | "users";
+
+type AppLocationState = {
+  view: AppView;
+  selectedClientId: number | null;
+  selectedConsultantId: number | null;
+  clientListPreset: ClientListPreset;
+};
+
+function parseAppLocation(): AppLocationState {
+  const url = new URL(window.location.href);
+  const consultantId = url.searchParams.get("consultant_id");
+  const stage = url.searchParams.get("stage");
+  const status = url.searchParams.get("status");
+  const overdue = url.searchParams.get("overdue");
+
+  if (url.pathname.startsWith("/clients/")) {
+    const clientId = Number(url.pathname.split("/")[2]);
+    return {
+      view: "clients",
+      selectedClientId: Number.isFinite(clientId) ? clientId : null,
+      selectedConsultantId: consultantId ? Number(consultantId) : null,
+      clientListPreset: { key: 0 },
+    };
+  }
+
+  if (url.pathname === "/clients") {
+    return {
+      view: "clients",
+      selectedClientId: null,
+      selectedConsultantId: consultantId ? Number(consultantId) : null,
+      clientListPreset: {
+        key: 0,
+        stage: stage ? (stage as Stage) : undefined,
+        status: status ? (status as ClientStatus) : undefined,
+        overdue: overdue === "true" ? true : undefined,
+      },
+    };
+  }
+
+  if (url.pathname === "/notifications") {
+    return {
+      view: "notifications",
+      selectedClientId: null,
+      selectedConsultantId: consultantId ? Number(consultantId) : null,
+      clientListPreset: { key: 0 },
+    };
+  }
+
+  if (url.pathname === "/analytics") {
+    return {
+      view: "analytics",
+      selectedClientId: null,
+      selectedConsultantId: consultantId ? Number(consultantId) : null,
+      clientListPreset: { key: 0 },
+    };
+  }
+
+  if (url.pathname === "/users") {
+    return {
+      view: "users",
+      selectedClientId: null,
+      selectedConsultantId: null,
+      clientListPreset: { key: 0 },
+    };
+  }
+
+  return {
+    view: "dashboard",
+    selectedClientId: null,
+    selectedConsultantId: consultantId ? Number(consultantId) : null,
+    clientListPreset: { key: 0 },
+  };
+}
+
+function buildAppUrl(state: AppLocationState) {
+  const search = new URLSearchParams();
+  if (state.selectedConsultantId) {
+    search.set("consultant_id", String(state.selectedConsultantId));
+  }
+
+  let pathname = "/dashboard";
+  if (state.view === "clients" && state.selectedClientId) {
+    pathname = `/clients/${state.selectedClientId}`;
+  } else if (state.view === "clients") {
+    pathname = "/clients";
+    if (state.clientListPreset.stage) search.set("stage", state.clientListPreset.stage);
+    if (state.clientListPreset.status) search.set("status", state.clientListPreset.status);
+    if (state.clientListPreset.overdue) search.set("overdue", "true");
+  } else if (state.view === "notifications") {
+    pathname = "/notifications";
+  } else if (state.view === "analytics") {
+    pathname = "/analytics";
+  } else if (state.view === "users") {
+    pathname = "/users";
+  }
+
+  const query = search.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
 export function App() {
+  const initialLocation = parseAppLocation();
   const [token, setToken] = useState(() => localStorage.getItem("clinic_token"));
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<"dashboard" | "clients" | "notifications" | "analytics">("dashboard");
-  const [selectedClientId, setSelectedClientId] = useState<number | null>(null);
+  const [view, setView] = useState<AppView>(initialLocation.view);
+  const [selectedClientId, setSelectedClientId] = useState<number | null>(initialLocation.selectedClientId);
   const [adminConsultants, setAdminConsultants] = useState<ConsultantAnalytics[]>([]);
-  const [selectedConsultantId, setSelectedConsultantId] = useState<number | null>(null);
-  const [clientListPreset, setClientListPreset] = useState<ClientListPreset>({ key: 0 });
+  const [selectedConsultantId, setSelectedConsultantId] = useState<number | null>(initialLocation.selectedConsultantId);
+  const [clientListPreset, setClientListPreset] = useState<ClientListPreset>(initialLocation.clientListPreset);
   const [authLoading, setAuthLoading] = useState(Boolean(token));
+  const hasInitializedHistory = useRef(false);
 
   useEffect(() => {
     if (!token) {
@@ -150,6 +314,38 @@ export function App() {
       .catch(() => setAdminConsultants([]));
   }, [token, user?.role]);
 
+  useEffect(() => {
+    function handlePopState() {
+      const next = parseAppLocation();
+      setView(next.view);
+      setSelectedClientId(next.selectedClientId);
+      setSelectedConsultantId(next.selectedConsultantId);
+      setClientListPreset({ ...next.clientListPreset, key: Date.now() });
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!token || authLoading) return;
+    const nextUrl = buildAppUrl({
+      view,
+      selectedClientId,
+      selectedConsultantId,
+      clientListPreset,
+    });
+    if (!hasInitializedHistory.current) {
+      window.history.replaceState(null, "", nextUrl);
+      hasInitializedHistory.current = true;
+      return;
+    }
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    if (currentUrl !== nextUrl) {
+      window.history.pushState(null, "", nextUrl);
+    }
+  }, [token, authLoading, view, selectedClientId, selectedConsultantId, clientListPreset]);
+
   function handleAuthenticated(nextToken: string, nextUser: User) {
     localStorage.setItem("clinic_token", nextToken);
     setToken(nextToken);
@@ -164,6 +360,8 @@ export function App() {
     setSelectedConsultantId(null);
     setAdminConsultants([]);
     setClientListPreset({ key: 0 });
+    hasInitializedHistory.current = false;
+    window.history.replaceState(null, "", "/");
   }
 
   function openClientList(preset: Omit<ClientListPreset, "key"> = {}) {
@@ -188,18 +386,23 @@ export function App() {
           <div className="mt-2 font-display text-3xl text-ink">Consult Flow</div>
         </div>
         <nav className="space-y-2">
-          <NavButton active={view === "dashboard"} icon={<LayoutDashboard size={18} />} onClick={() => setView("dashboard")}>
+          <NavButton active={view === "dashboard"} icon={<LayoutDashboard size={18} />} onClick={() => { setSelectedClientId(null); setView("dashboard"); }}>
             工作台
           </NavButton>
           {user.role === "admin" && (
-            <NavButton active={view === "analytics"} icon={<Activity size={18} />} onClick={() => setView("analytics")}>
+            <NavButton active={view === "analytics"} icon={<Activity size={18} />} onClick={() => { setSelectedClientId(null); setView("analytics"); }}>
               Analytics
             </NavButton>
           )}
-          <NavButton active={view === "clients"} icon={<UserRound size={18} />} onClick={() => setView("clients")}>
+          {user.role === "admin" && (
+            <NavButton active={view === "users"} icon={<ShieldCheck size={18} />} onClick={() => { setSelectedClientId(null); setView("users"); }}>
+              使用者管理
+            </NavButton>
+          )}
+          <NavButton active={view === "clients"} icon={<UserRound size={18} />} onClick={() => { setSelectedClientId(null); setView("clients"); }}>
             客戶列表
           </NavButton>
-          <NavButton active={view === "notifications"} icon={<Bell size={18} />} onClick={() => setView("notifications")}>
+          <NavButton active={view === "notifications"} icon={<Bell size={18} />} onClick={() => { setSelectedClientId(null); setView("notifications"); }}>
             通知中心
           </NavButton>
         </nav>
@@ -240,7 +443,9 @@ export function App() {
                 {view === "dashboard"
                   ? user.role === "admin" ? "主控者總覽" : "今日咨詢工作台"
                   : view === "analytics"
-                    ? "Analytics"
+                  ? "Analytics"
+                  : view === "users"
+                    ? "使用者管理"
                   : view === "notifications"
                     ? "通知中心"
                     : selectedClientId ? "客戶詳情" : "客戶管理"}
@@ -301,6 +506,9 @@ export function App() {
           )}
           {view === "analytics" && user.role === "admin" && (
             <AnalyticsPage token={token} consultants={adminConsultants} selectedConsultantId={selectedConsultantId} />
+          )}
+          {view === "users" && user.role === "admin" && (
+            <UserManagementPage token={token} currentUser={user} />
           )}
         </div>
       </main>
@@ -445,6 +653,221 @@ function AdminSidebarConsultants({
         ))}
       </div>
     </section>
+  );
+}
+
+function UserManagementPage({ token, currentUser }: { token: string; currentUser: User }) {
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [error, setError] = useState("");
+  const [createForm, setCreateForm] = useState({
+    name: "",
+    email: "",
+    role: "consultant" as User["role"],
+    password: "",
+    status: "active" as UserStatus,
+  });
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    email: "",
+    role: "consultant" as User["role"],
+    status: "active" as UserStatus,
+  });
+  const [passwordUserId, setPasswordUserId] = useState<number | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [savedMessage, setSavedMessage] = useState("");
+
+  useEffect(() => {
+    getUsers(token)
+      .then((response) => {
+        setUsers(response.data);
+        setError("");
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "使用者資料讀取失敗"));
+  }, [token, reloadKey]);
+
+  async function submitCreate(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setSavedMessage("");
+    try {
+      await createUser(token, createForm);
+      setCreateForm({ name: "", email: "", role: "consultant", password: "", status: "active" });
+      setSavedMessage("帳號已建立");
+      setReloadKey((value) => value + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "建立帳號失敗");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function startEdit(user: ManagedUser) {
+    setEditingId(user.id);
+    setEditForm({
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+    });
+    setPasswordUserId(null);
+    setNewPassword("");
+    setSavedMessage("");
+    setError("");
+  }
+
+  async function submitEdit(userId: number) {
+    setSaving(true);
+    setError("");
+    setSavedMessage("");
+    try {
+      await updateUser(token, userId, editForm);
+      setEditingId(null);
+      setSavedMessage("帳號已更新");
+      setReloadKey((value) => value + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新帳號失敗");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitResetPassword(userId: number) {
+    setSaving(true);
+    setError("");
+    setSavedMessage("");
+    try {
+      await resetUserPassword(token, userId, newPassword);
+      setPasswordUserId(null);
+      setNewPassword("");
+      setSavedMessage("密碼已重設");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重設密碼失敗");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <Panel title="建立帳號" icon={<Plus size={18} />}>
+        <form className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1fr_1fr_180px_180px_180px_auto]" onSubmit={submitCreate}>
+          <input className="field" placeholder="姓名" value={createForm.name} onChange={(event) => setCreateForm((current) => ({ ...current, name: event.target.value }))} required />
+          <input className="field" type="email" placeholder="Email" value={createForm.email} onChange={(event) => setCreateForm((current) => ({ ...current, email: event.target.value }))} required />
+          <select className="field" value={createForm.role} onChange={(event) => setCreateForm((current) => ({ ...current, role: event.target.value as User["role"] }))}>
+            <option value="consultant">consultant</option>
+            <option value="admin">admin</option>
+          </select>
+          <select className="field" value={createForm.status} onChange={(event) => setCreateForm((current) => ({ ...current, status: event.target.value as UserStatus }))}>
+            <option value="active">active</option>
+            <option value="inactive">inactive</option>
+          </select>
+          <input className="field" type="password" placeholder="初始密碼（至少8碼）" value={createForm.password} onChange={(event) => setCreateForm((current) => ({ ...current, password: event.target.value }))} required />
+          <button className="button-primary" disabled={saving}>{saving ? "建立中..." : "建立帳號"}</button>
+        </form>
+        {error ? <div className="mt-3"><InlineMessage tone="error">{error}</InlineMessage></div> : null}
+        {savedMessage ? <div className="mt-3"><InlineMessage tone="success">{savedMessage}</InlineMessage></div> : null}
+      </Panel>
+
+      <Panel title="帳號列表" icon={<UserRound size={18} />}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[880px] border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-ink/10 text-left text-xs uppercase tracking-[0.12em] text-ink/45">
+                <th className="py-3 pr-4 font-semibold">姓名</th>
+                <th className="py-3 pr-4 font-semibold">Email</th>
+                <th className="py-3 pr-4 font-semibold">角色</th>
+                <th className="py-3 pr-4 font-semibold">狀態</th>
+                <th className="py-3 pr-4 font-semibold">建立時間</th>
+                <th className="py-3 font-semibold">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((item) => (
+                <tr key={item.id} className="border-b border-ink/5 align-top last:border-b-0">
+                  <td className="py-4 pr-4">
+                    {editingId === item.id ? (
+                      <input className="field" value={editForm.name} onChange={(event) => setEditForm((current) => ({ ...current, name: event.target.value }))} />
+                    ) : item.name}
+                  </td>
+                  <td className="py-4 pr-4">
+                    {editingId === item.id ? (
+                      <input className="field" type="email" value={editForm.email} onChange={(event) => setEditForm((current) => ({ ...current, email: event.target.value }))} />
+                    ) : item.email}
+                  </td>
+                  <td className="py-4 pr-4">
+                    {editingId === item.id ? (
+                      <select className="field" value={editForm.role} onChange={(event) => setEditForm((current) => ({ ...current, role: event.target.value as User["role"] }))}>
+                        <option value="consultant">consultant</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    ) : item.role}
+                  </td>
+                  <td className="py-4 pr-4">
+                    {editingId === item.id ? (
+                      <select className="field" value={editForm.status} onChange={(event) => setEditForm((current) => ({ ...current, status: event.target.value as UserStatus }))}>
+                        <option value="active">active</option>
+                        <option value="inactive">inactive</option>
+                      </select>
+                    ) : (
+                      <span className={classNames("rounded-full px-2 py-1 text-xs font-semibold", item.status === "active" ? "bg-clinic/10 text-clinic" : "bg-oxide/10 text-oxide")}>
+                        {item.status}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-4 pr-4">{formatDate(item.created_at)}</td>
+                  <td className="py-4">
+                    <div className="flex flex-wrap gap-2">
+                      {editingId === item.id ? (
+                        <>
+                          <button type="button" className="button-primary" disabled={saving} onClick={() => submitEdit(item.id)}>
+                            {saving ? "儲存中..." : "儲存"}
+                          </button>
+                          <button type="button" className="button-secondary" onClick={() => setEditingId(null)}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" className="button-secondary" onClick={() => startEdit(item)}>
+                          編輯
+                        </button>
+                      )}
+                      {passwordUserId === item.id ? (
+                        <>
+                          <input
+                            className="field min-w-[220px]"
+                            type="password"
+                            placeholder="新密碼（至少8碼）"
+                            value={newPassword}
+                            onChange={(event) => setNewPassword(event.target.value)}
+                          />
+                          <button type="button" className="button-primary" disabled={saving || newPassword.length < 8} onClick={() => submitResetPassword(item.id)}>
+                            {saving ? "重設中..." : "送出密碼"}
+                          </button>
+                          <button type="button" className="button-secondary" onClick={() => { setPasswordUserId(null); setNewPassword(""); }}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" className="button-secondary" onClick={() => { setPasswordUserId(item.id); setNewPassword(""); setEditingId(null); }}>
+                          重設密碼
+                        </button>
+                      )}
+                      {item.id === currentUser.id && (
+                        <span className="self-center text-xs text-ink/45">目前登入帳號</span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -647,22 +1070,23 @@ function AdminDashboard({
 }) {
   const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
   const [funnel, setFunnel] = useState<AnalyticsFunnel | null>(null);
+  const [funnelRange, setFunnelRange] = useState(defaultFunnelRange);
   const [barriers, setBarriers] = useState<BarrierAnalytics[]>([]);
+  const [comparedConsultantIds, setComparedConsultantIds] = useState<number[]>([]);
   const [overdueItems, setOverdueItems] = useState<Array<{ client_id: number; client_name: string; current_stage: Stage; next_follow_up_at: string; overdue_days: number | null }>>([]);
   const [stagnantItems, setStagnantItems] = useState<ClientListItem[]>([]);
   const [error, setError] = useState("");
+  const [funnelError, setFunnelError] = useState("");
 
   useEffect(() => {
     Promise.all([
       getAnalyticsOverview(token, selectedConsultantId),
-      getAnalyticsFunnel(token, selectedConsultantId),
       getBarrierAnalytics(token, selectedConsultantId),
       getOverdueFollowUps(token, { consultantId: selectedConsultantId, days: 1 }),
       getStagnantClients(token, selectedConsultantId, 14),
     ])
-      .then(([overviewData, funnelData, barrierData, overdueData, stagnantData]) => {
+      .then(([overviewData, barrierData, overdueData, stagnantData]) => {
         setOverview(overviewData);
-        setFunnel(funnelData);
         setBarriers(barrierData.data);
         setOverdueItems(overdueData.data.slice(0, 6));
         setStagnantItems(stagnantData.data);
@@ -670,10 +1094,35 @@ function AdminDashboard({
       .catch((err) => setError(err instanceof Error ? err.message : "管理數據讀取失敗"));
   }, [token, selectedConsultantId]);
 
+  useEffect(() => {
+    if (!isValidFunnelRange(funnelRange)) return;
+    setFunnelError("");
+    getAnalyticsFunnel(token, selectedConsultantId, {
+      startDate: funnelRange.start || undefined,
+      endDate: funnelRange.end || undefined,
+    })
+      .then(setFunnel)
+      .catch((err) => setFunnelError(err instanceof Error ? err.message : "Funnel 讀取失敗"));
+  }, [token, selectedConsultantId, funnelRange]);
+
+  useEffect(() => {
+    if (selectedConsultantId) {
+      setComparedConsultantIds([selectedConsultantId]);
+      return;
+    }
+    setComparedConsultantIds((current) => {
+      const validIds = current.filter((id) => consultants.some((item) => item.consultant_id === id));
+      return validIds.length > 0 ? validIds : consultants.map((item) => item.consultant_id);
+    });
+  }, [selectedConsultantId, consultants]);
+
   if (error) return <ErrorPanel message={error} />;
   if (!overview || !funnel) return <ShellLoading />;
 
   const selectedConsultant = consultants.find((item) => item.consultant_id === selectedConsultantId);
+  const visibleConsultants = selectedConsultantId
+    ? consultants.filter((item) => item.consultant_id === selectedConsultantId)
+    : consultants.filter((item) => comparedConsultantIds.length === 0 || comparedConsultantIds.includes(item.consultant_id));
 
   return (
     <div className="space-y-6">
@@ -692,6 +1141,8 @@ function AdminDashboard({
 
       <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
         <Panel title="S1-S6 Funnel" icon={<Filter size={18} />}>
+          <FunnelDateRangeFilter value={funnelRange} onChange={setFunnelRange} />
+          {funnelError ? <div className="mt-3 text-sm text-oxide">{funnelError}</div> : null}
           <AdminFunnel funnel={funnel} />
         </Panel>
         <Panel title="營運訊號" icon={<Activity size={18} />}>
@@ -718,7 +1169,14 @@ function AdminDashboard({
 
       <section className="grid gap-6 xl:grid-cols-[1.3fr_0.7fr]">
         <Panel title="Consultant Performance" icon={<UserRound size={18} />}>
-          <ConsultantPerformanceTable consultants={consultants} />
+          {!selectedConsultantId && consultants.length > 1 && (
+            <ConsultantComparisonFilter
+              consultants={consultants}
+              selectedIds={comparedConsultantIds}
+              onChange={setComparedConsultantIds}
+            />
+          )}
+          <ConsultantPerformanceTable consultants={visibleConsultants} />
         </Panel>
         <Panel title="Decision Barrier Analysis" icon={<AlertTriangle size={18} />}>
           <BarrierBars barriers={barriers} />
@@ -738,20 +1196,20 @@ function AnalyticsPage({
   selectedConsultantId: number | null;
 }) {
   const [funnel, setFunnel] = useState<AnalyticsFunnel | null>(null);
+  const [funnelRange, setFunnelRange] = useState(defaultFunnelRange);
   const [consultantRows, setConsultantRows] = useState<ConsultantAnalytics[]>([]);
   const [barriers, setBarriers] = useState<BarrierAnalytics[]>([]);
   const [revenue, setRevenue] = useState<AnalyticsRevenue | null>(null);
   const [error, setError] = useState("");
+  const [funnelError, setFunnelError] = useState("");
 
   useEffect(() => {
     Promise.all([
-      getAnalyticsFunnel(token, selectedConsultantId),
       getBarrierAnalytics(token, selectedConsultantId),
       getAnalyticsRevenue(token, selectedConsultantId),
       getAnalyticsConsultants(token),
     ])
-      .then(([funnelData, barrierData, revenueData, consultantData]) => {
-        setFunnel(funnelData);
+      .then(([barrierData, revenueData, consultantData]) => {
         setBarriers(barrierData.data);
         setRevenue(revenueData);
         setConsultantRows(
@@ -762,6 +1220,17 @@ function AnalyticsPage({
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Analytics 讀取失敗"));
   }, [token, selectedConsultantId]);
+
+  useEffect(() => {
+    if (!isValidFunnelRange(funnelRange)) return;
+    setFunnelError("");
+    getAnalyticsFunnel(token, selectedConsultantId, {
+      startDate: funnelRange.start || undefined,
+      endDate: funnelRange.end || undefined,
+    })
+      .then(setFunnel)
+      .catch((err) => setFunnelError(err instanceof Error ? err.message : "Funnel 讀取失敗"));
+  }, [token, selectedConsultantId, funnelRange]);
 
   if (error) return <ErrorPanel message={error} />;
   if (!funnel || !revenue) return <ShellLoading />;
@@ -785,6 +1254,8 @@ function AnalyticsPage({
 
       <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         <Panel title="S1-S6 Funnel" icon={<Filter size={18} />}>
+          <FunnelDateRangeFilter value={funnelRange} onChange={setFunnelRange} />
+          {funnelError ? <div className="mt-3 text-sm text-oxide">{funnelError}</div> : null}
           <AdminFunnel funnel={funnel} />
         </Panel>
         <Panel title="Consultant Performance" icon={<UserRound size={18} />}>
@@ -931,6 +1402,62 @@ function RevenueTrendChart({ revenue }: { revenue: AnalyticsRevenue }) {
   );
 }
 
+function FunnelDateRangeFilter({
+  value,
+  onChange,
+}: {
+  value: { start: string; end: string };
+  onChange: (value: { start: string; end: string }) => void;
+}) {
+  const invalid = !isValidFunnelRange(value);
+  const [recentDays, setRecentDays] = useState(30);
+
+  return (
+    <div className="mb-4 rounded-md border border-ink/10 bg-paper p-3">
+      <div className="grid gap-3 md:grid-cols-[140px_1fr_1fr] md:items-end">
+        <label className="space-y-1 text-sm">
+          <span className="text-ink/55">最近天數</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              value={recentDays}
+              onChange={(event) => setRecentDays(Math.max(1, Number(event.target.value) || 1))}
+              className="w-full rounded-md border border-ink/10 bg-white px-3 py-2"
+            />
+            <button
+              type="button"
+              onClick={() => onChange(funnelRangeFromDays(recentDays))}
+              className="whitespace-nowrap rounded-md border border-ink/10 px-3 py-2 text-sm font-semibold text-ink transition hover:border-clinic/40"
+            >
+              套用
+            </button>
+          </div>
+        </label>
+        <label className="space-y-1 text-sm">
+          <span className="text-ink/55">開始</span>
+          <input
+            type="datetime-local"
+            value={value.start}
+            onChange={(event) => onChange({ ...value, start: event.target.value })}
+            className="w-full rounded-md border border-ink/10 bg-white px-3 py-2"
+          />
+        </label>
+        <label className="space-y-1 text-sm">
+          <span className="text-ink/55">結束</span>
+          <input
+            type="datetime-local"
+            value={value.end}
+            onChange={(event) => onChange({ ...value, end: event.target.value })}
+            className="w-full rounded-md border border-ink/10 bg-white px-3 py-2"
+          />
+        </label>
+      </div>
+      {invalid ? <div className="mt-2 text-xs text-oxide">開始時間不能晚於結束時間</div> : null}
+    </div>
+  );
+}
+
 function AdminFunnel({ funnel }: { funnel: AnalyticsFunnel }) {
   const max = Math.max(1, ...funnel.stages.map((item) => item.count));
   return (
@@ -986,11 +1513,14 @@ function ConsultantPerformanceTable({ consultants }: { consultants: ConsultantAn
             <th className="py-3 pr-4 font-semibold">咨詢師</th>
             <th className="py-3 pr-4 font-semibold">客戶</th>
             <th className="py-3 pr-4 font-semibold">新增</th>
-            <th className="py-3 pr-4 font-semibold">平均間隔</th>
             <th className="py-3 pr-4 font-semibold">逾期</th>
+            <th className="py-3 pr-4 font-semibold">S1</th>
+            <th className="py-3 pr-4 font-semibold">S2</th>
+            <th className="py-3 pr-4 font-semibold">S3</th>
+            <th className="py-3 pr-4 font-semibold">S4</th>
+            <th className="py-3 pr-4 font-semibold">S5</th>
             <th className="py-3 pr-4 font-semibold">S6</th>
             <th className="py-3 pr-4 font-semibold">預估金額</th>
-            <th className="py-3 font-semibold">S1→S6</th>
           </tr>
         </thead>
         <tbody>
@@ -999,15 +1529,73 @@ function ConsultantPerformanceTable({ consultants }: { consultants: ConsultantAn
               <td className="py-4 pr-4 font-semibold">{item.consultant_name}</td>
               <td className="py-4 pr-4">{item.total_clients}</td>
               <td className="py-4 pr-4">{item.new_clients}</td>
-              <td className="py-4 pr-4">{item.average_follow_up_gap_days.toFixed(1)} 天</td>
               <td className={classNames("py-4 pr-4 font-semibold", item.overdue_followups > 0 && "text-oxide")}>{item.overdue_followups}</td>
+              <td className="py-4 pr-4">{item.stage_distribution.S1 ?? 0}</td>
+              <td className="py-4 pr-4">{item.stage_distribution.S2 ?? 0}</td>
+              <td className="py-4 pr-4">{item.stage_distribution.S3 ?? 0}</td>
+              <td className="py-4 pr-4">{item.stage_distribution.S4 ?? 0}</td>
+              <td className="py-4 pr-4">{item.stage_distribution.S5 ?? 0}</td>
               <td className="py-4 pr-4">{item.s6_clients}</td>
               <td className="py-4 pr-4">{money(item.estimated_revenue)}</td>
-              <td className="py-4">{item.conversion_rate_s1_to_s6.toFixed(1)}%</td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function ConsultantComparisonFilter({
+  consultants,
+  selectedIds,
+  onChange,
+}: {
+  consultants: ConsultantAnalytics[];
+  selectedIds: number[];
+  onChange: (ids: number[]) => void;
+}) {
+  function toggle(id: number) {
+    onChange(
+      selectedIds.includes(id)
+        ? selectedIds.filter((item) => item !== id)
+        : [...selectedIds, id],
+    );
+  }
+
+  const allSelected = selectedIds.length === consultants.length;
+
+  return (
+    <div className="mb-4 rounded-md border border-ink/10 bg-paper p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-ink/70">比對咨詢師</div>
+        <button
+          type="button"
+          className="text-xs font-semibold text-moss hover:text-ink"
+          onClick={() => onChange(allSelected ? [] : consultants.map((item) => item.consultant_id))}
+        >
+          {allSelected ? "全部取消" : "全選"}
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {consultants.map((item) => {
+          const selected = selectedIds.includes(item.consultant_id);
+          return (
+            <button
+              key={item.consultant_id}
+              type="button"
+              onClick={() => toggle(item.consultant_id)}
+              className={classNames(
+                "rounded-full border px-3 py-1.5 text-sm transition",
+                selected
+                  ? "border-ink bg-ink text-paper"
+                  : "border-ink/10 bg-white text-ink/70 hover:border-clinic/40 hover:text-ink",
+              )}
+            >
+              {item.consultant_name}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1290,6 +1878,7 @@ function ClientDetailView({
   const [barriers, setBarriers] = useState<DecisionBarrier[]>([]);
   const [adminNotes, setAdminNotes] = useState<AdminNoteItem[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
+  const [editingFollowUpId, setEditingFollowUpId] = useState<number | null>(null);
   const [archiveError, setArchiveError] = useState("");
   const [archiving, setArchiving] = useState(false);
   const [barrierSavingId, setBarrierSavingId] = useState<number | null>(null);
@@ -1313,6 +1902,8 @@ function ClientDetailView({
 
   if (!client) return <ShellLoading />;
   const currentClient = client;
+  const ageLabel = currentClient.age === null ? null : `${currentClient.age} 歲`;
+  const zodiacLabel = zodiacFromBirthDate(currentClient.birth_date);
 
   async function archiveCurrentClient() {
     if (!window.confirm("確定要封存這位客戶？封存後可用 archived 狀態篩選找回。")) return;
@@ -1374,6 +1965,9 @@ function ClientDetailView({
               <span>{client.line_id ?? "未填 Line"}</span>
               <span>{client.interested_treatment ?? "未填療程"}</span>
               <span>{money(client.estimated_value)}</span>
+              <span>{client.birth_date ? `生日 ${client.birth_date}` : "未填生日"}</span>
+              <span>{ageLabel ?? "未顯示年齡"}</span>
+              <span>{zodiacLabel ?? "未顯示星座"}</span>
             </div>
           </div>
           <div className="space-y-3">
@@ -1419,11 +2013,20 @@ function ClientDetailView({
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <Panel title="新增追蹤紀錄" icon={<FileClock size={18} />}>
-          <FollowUpForm token={token} clientId={client.id} onDone={() => setReloadKey((value) => value + 1)} />
+        <Panel title={editingFollowUpId ? "編輯追蹤紀錄" : "新增追蹤紀錄"} icon={<FileClock size={18} />}>
+          <FollowUpForm
+            token={token}
+            clientId={client.id}
+            editingItem={followUps.find((item) => item.id === editingFollowUpId) ?? null}
+            onCancelEdit={() => setEditingFollowUpId(null)}
+            onDone={() => {
+              setEditingFollowUpId(null);
+              setReloadKey((value) => value + 1);
+            }}
+          />
         </Panel>
         <Panel title="追蹤時間軸" icon={<Clock3 size={18} />}>
-          <Timeline followUps={followUps} />
+          <Timeline followUps={followUps} onEdit={(id) => setEditingFollowUpId(id)} editingFollowUpId={editingFollowUpId} />
         </Panel>
       </section>
 
@@ -1676,7 +2279,7 @@ function clientToPayload(client?: ClientDetail, defaultConsultantId?: number): C
     line_id: client?.line_id ?? "",
     email: client?.email ?? "",
     gender: client?.gender ?? "",
-    age: client?.age ?? undefined,
+    birth_date: client?.birth_date ?? undefined,
     source: client?.source ?? "",
     interested_treatment: client?.interested_treatment ?? "",
     initial_need: client?.initial_need ?? "",
@@ -1712,6 +2315,8 @@ function ClientForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const computedAge = calculateAgeFromBirthDate(payload.birth_date);
+  const computedZodiac = zodiacFromBirthDate(payload.birth_date);
 
   useEffect(() => {
     setPayload(clientToPayload(client, defaultConsultantId ?? consultants[0]?.consultant_id));
@@ -1781,15 +2386,20 @@ function ClientForm({
           </select>
         </label>
         <label className="form-label mb-0">
-          年齡
+          出生年月日
           <input
             className="field"
-            type="number"
-            min={0}
-            max={130}
-            value={payload.age ?? ""}
-            onChange={(event) => setField("age", event.target.value ? Number(event.target.value) : undefined)}
+            type="text"
+            inputMode="numeric"
+            placeholder="YYYY-MM-DD"
+            value={payload.birth_date ?? ""}
+            onChange={(event) => setField("birth_date", event.target.value || undefined)}
           />
+          <div className="mt-1 text-xs text-ink/50">
+            {computedAge === null
+              ? "系統會自動推算年齡與星座"
+              : `系統推算：${computedAge} 歲${computedZodiac ? ` · ${computedZodiac}` : ""}`}
+          </div>
         </label>
         <label className="form-label mb-0">
           客戶來源
@@ -1913,15 +2523,50 @@ function StageUpdateForm({ token, clientId, currentStage, onDone }: { token: str
   );
 }
 
-function FollowUpForm({ token, clientId, onDone }: { token: string; clientId: number; onDone: () => void }) {
+function FollowUpForm({
+  token,
+  clientId,
+  editingItem,
+  onDone,
+  onCancelEdit,
+}: {
+  token: string;
+  clientId: number;
+  editingItem: FollowUpItem | null;
+  onDone: () => void;
+  onCancelEdit: () => void;
+}) {
   const [method, setMethod] = useState<ContactMethod>("line");
   const [content, setContent] = useState("");
   const [response, setResponse] = useState("");
   const [nextAction, setNextAction] = useState("");
   const [nextAt, setNextAt] = useState("");
+  const [needAdminSupport, setNeedAdminSupport] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!editingItem) {
+      setMethod("line");
+      setContent("");
+      setResponse("");
+      setNextAction("");
+      setNextAt("");
+      setNeedAdminSupport(false);
+      setError("");
+      setSaved(false);
+      return;
+    }
+    setMethod(editingItem.contact_method);
+    setContent(editingItem.content);
+    setResponse(editingItem.client_response ?? "");
+    setNextAction(editingItem.next_action ?? "");
+    setNextAt(toDateTimeInputValue(editingItem.next_follow_up_at));
+    setNeedAdminSupport(editingItem.need_admin_support);
+    setError("");
+    setSaved(false);
+  }, [editingItem]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1929,21 +2574,29 @@ function FollowUpForm({ token, clientId, onDone }: { token: string; clientId: nu
     setError("");
     setSaved(false);
     try {
-      await createFollowUp(token, clientId, {
+      const payload = {
         contact_method: method,
         content,
         client_response: response || undefined,
         next_action: nextAction || undefined,
         next_follow_up_at: nextAt ? new Date(nextAt).toISOString() : undefined,
-      });
+        need_admin_support: needAdminSupport,
+      };
+      if (editingItem) {
+        await updateFollowUp(token, editingItem.id, payload);
+      } else {
+        await createFollowUp(token, clientId, payload);
+      }
+      setMethod("line");
       setContent("");
       setResponse("");
       setNextAction("");
       setNextAt("");
+      setNeedAdminSupport(false);
       setSaved(true);
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "追蹤紀錄新增失敗");
+      setError(err instanceof Error ? err.message : editingItem ? "追蹤紀錄更新失敗" : "追蹤紀錄新增失敗");
     } finally {
       setSaving(false);
     }
@@ -1958,9 +2611,22 @@ function FollowUpForm({ token, clientId, onDone }: { token: string; clientId: nu
       <textarea className="field min-h-20" placeholder="客戶反應" value={response} onChange={(event) => setResponse(event.target.value)} />
       <input className="field" placeholder="下一步行動" value={nextAction} onChange={(event) => setNextAction(event.target.value)} />
       <input className="field" type="datetime-local" value={nextAt} onChange={(event) => setNextAt(event.target.value)} />
+      <label className="flex items-center gap-2 text-sm text-ink/70">
+        <input type="checkbox" checked={needAdminSupport} onChange={(event) => setNeedAdminSupport(event.target.checked)} />
+        <span>需要主控者協助</span>
+      </label>
       {error && <InlineMessage tone="error">{error}</InlineMessage>}
-      {saved && <InlineMessage tone="success">追蹤紀錄已新增</InlineMessage>}
-      <button className="button-primary w-full" disabled={saving}>{saving ? "新增中..." : "新增追蹤"}</button>
+      {saved && <InlineMessage tone="success">{editingItem ? "追蹤紀錄已更新" : "追蹤紀錄已新增"}</InlineMessage>}
+      <div className="flex gap-3">
+        {editingItem ? (
+          <button type="button" className="button-secondary flex-1" onClick={onCancelEdit} disabled={saving}>
+            取消編輯
+          </button>
+        ) : null}
+        <button className="button-primary flex-1" disabled={saving}>
+          {saving ? (editingItem ? "更新中..." : "新增中...") : (editingItem ? "更新追蹤" : "新增追蹤")}
+        </button>
+      </div>
     </form>
   );
 }
@@ -2006,7 +2672,15 @@ function BarrierForm({ token, clientId, onDone }: { token: string; clientId: num
   );
 }
 
-function Timeline({ followUps }: { followUps: FollowUpItem[] }) {
+function Timeline({
+  followUps,
+  onEdit,
+  editingFollowUpId,
+}: {
+  followUps: FollowUpItem[];
+  onEdit: (id: number) => void;
+  editingFollowUpId: number | null;
+}) {
   if (followUps.length === 0) return <EmptyText>尚無追蹤紀錄</EmptyText>;
   return (
     <div className="space-y-4">
@@ -2015,10 +2689,23 @@ function Timeline({ followUps }: { followUps: FollowUpItem[] }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-clinic/10 px-2 py-1 text-xs font-semibold text-clinic">{item.contact_method}</span>
             <span className="text-sm text-ink/50">{formatDate(item.created_at)}</span>
+            <button
+              type="button"
+              className={classNames(
+                "ml-auto inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold transition",
+                editingFollowUpId === item.id ? "border-clinic/20 bg-clinic/10 text-clinic" : "border-ink/10 text-ink/70 hover:border-clinic/30 hover:text-clinic",
+              )}
+              onClick={() => onEdit(item.id)}
+            >
+              <Pencil size={12} />
+              編輯
+            </button>
           </div>
           <div className="mt-2 font-semibold">{item.content}</div>
           {item.client_response && <div className="mt-1 text-sm text-ink/60">{item.client_response}</div>}
+          {item.next_action && <div className="mt-1 text-sm text-ink/55">下一步：{item.next_action}</div>}
           {item.next_follow_up_at && <div className="mt-2 text-sm text-brass">下次追蹤：{formatDate(item.next_follow_up_at)}</div>}
+          {item.need_admin_support && <div className="mt-2 text-xs font-semibold text-oxide">需要主控者協助</div>}
         </div>
       ))}
     </div>

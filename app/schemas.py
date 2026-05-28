@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -10,6 +10,7 @@ from app.models.enums import (
     NotificationStatus,
     Stage,
     UserRole,
+    UserStatus,
 )
 
 
@@ -32,6 +33,41 @@ class LoginResponse(BaseModel):
     user: TokenUser
 
 
+class ManagedUserItem(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: UserRole
+    status: UserStatus
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserListResponse(BaseModel):
+    data: list[ManagedUserItem]
+
+
+class UserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: EmailStr
+    role: UserRole
+    password: str = Field(min_length=8, max_length=128)
+    status: UserStatus = UserStatus.active
+
+
+class UserUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    email: EmailStr | None = None
+    role: UserRole | None = None
+    status: UserStatus | None = None
+
+
+class UserPasswordReset(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
 class AssignedConsultant(BaseModel):
     id: int
     name: str
@@ -45,7 +81,7 @@ class ClientBase(BaseModel):
     line_id: str | None = None
     email: EmailStr | None = None
     gender: str | None = None
-    age: int | None = Field(default=None, ge=0, le=130)
+    birth_date: date | None = None
     source: str | None = None
     interested_treatment: str | None = None
     initial_need: str | None = None
@@ -111,6 +147,7 @@ class ClientDetail(BaseModel):
     line_id: str | None
     email: EmailStr | None
     gender: str | None
+    birth_date: date | None
     age: int | None
     source: str | None
     interested_treatment: str | None
@@ -169,6 +206,15 @@ class StageLogResponse(BaseModel):
 
 
 class FollowUpCreate(BaseModel):
+    contact_method: ContactMethod
+    content: str
+    client_response: str | None = None
+    next_action: str | None = None
+    next_follow_up_at: datetime | None = None
+    need_admin_support: bool = False
+
+
+class FollowUpUpdate(BaseModel):
     contact_method: ContactMethod
     content: str
     client_response: str | None = None
