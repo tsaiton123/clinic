@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 
 from fastapi import HTTPException, status
@@ -69,12 +70,55 @@ def apply_client_filters(
 
 
 def latest_follow_up_for_client(db: Session, client_id: int) -> FollowUpLog | None:
-    return db.scalar(
-        select(FollowUpLog)
-        .where(FollowUpLog.client_id == client_id)
-        .order_by(FollowUpLog.next_follow_up_at.desc().nullslast(), FollowUpLog.created_at.desc())
-        .limit(1)
-    )
+    return latest_follow_ups_for_clients(db, [client_id]).get(client_id)
+
+
+def latest_follow_ups_for_clients(
+    db: Session, client_ids: Sequence[int]
+) -> dict[int, FollowUpLog]:
+    """Preserve the existing scheduled-date priority, loading one row per client.
+
+    Chunk IDs to keep bind counts bounded on both SQLite and PostgreSQL. The ID
+    breaks otherwise identical timestamps deterministically.
+    """
+    result: dict[int, FollowUpLog] = {}
+    for offset in range(0, len(client_ids), 500):
+        ranked = (
+            select(
+                FollowUpLog.id.label("follow_up_id"),
+                func.row_number().over(
+                    partition_by=FollowUpLog.client_id,
+                    order_by=(
+                        FollowUpLog.next_follow_up_at.desc().nullslast(),
+                        FollowUpLog.created_at.desc(),
+                        FollowUpLog.id.desc(),
+                    ),
+                ).label("position"),
+            )
+            .where(FollowUpLog.client_id.in_(client_ids[offset:offset + 500]))
+            .subquery()
+        )
+        rows = db.scalars(
+            select(FollowUpLog)
+            .join(ranked, ranked.c.follow_up_id == FollowUpLog.id)
+            .where(ranked.c.position == 1)
+        ).all()
+        result.update((row.client_id, row) for row in rows)
+    return result
+
+
+def latest_stage_times_for_clients(
+    db: Session, client_ids: Sequence[int]
+) -> dict[int, datetime]:
+    result: dict[int, datetime] = {}
+    for offset in range(0, len(client_ids), 500):
+        rows = db.execute(
+            select(StageLog.client_id, func.max(StageLog.created_at))
+            .where(StageLog.client_id.in_(client_ids[offset:offset + 500]))
+            .group_by(StageLog.client_id)
+        ).all()
+        result.update((client_id, created_at) for client_id, created_at in rows if created_at is not None)
+    return result
 
 
 def latest_follow_up_rows(

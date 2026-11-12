@@ -18,7 +18,7 @@ from app.schemas import (
     NotificationClient,
     NotificationItem,
 )
-from app.services import days_overdue, latest_follow_up_for_client, validate_consultant
+from app.services import days_overdue, latest_follow_ups_for_clients, validate_consultant
 
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -101,10 +101,11 @@ def consultant_dashboard(
     today_followups: list[FollowUpDueItem] = []
     overdue_followups: list[FollowUpDueItem] = []
     distribution = {stage.value: 0 for stage in STAGE_ORDER}
+    latest_follow_ups = latest_follow_ups_for_clients(db, [client.id for client in clients])
 
     for client in clients:
         distribution[client.current_stage.value] += 1
-        latest = latest_follow_up_for_client(db, client.id)
+        latest = latest_follow_ups.get(client.id)
         setattr(client, "_dashboard_latest_follow_up", latest)
         item = due_item(client)
         if item is None:
@@ -116,12 +117,11 @@ def consultant_dashboard(
         elif due_at < datetime.now(UTC):
             overdue_followups.append(item)
 
-    recent_clients = [client_list_item(db, client) for client in clients[:5]]
+    recent_clients = [client_list_item(client, latest_follow_ups.get(client.id)) for client in clients[:5]]
     upcoming_s6_clients = [
-        client_list_item(db, client)
-        for client in clients
-        if client.current_stage == Stage.S5
-    ][:5]
+        client_list_item(client, latest_follow_ups.get(client.id))
+        for client in [client for client in clients if client.current_stage == Stage.S5][:5]
+    ]
 
     notifications = db.scalars(
         select(Notification)

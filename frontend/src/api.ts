@@ -21,35 +21,16 @@ import type {
   User,
   UserStatus,
 } from "./types";
+import { createHttpClient } from "./httpClient";
+export { ApiError } from "./httpClient";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-export class ApiError extends Error {
-  status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function request<T>(path: string, options: RequestInit = {}, token?: string | null): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body.detail ?? "API request failed");
-  }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  return response.json() as Promise<T>;
-}
+const http = createHttpClient(API_BASE_URL);
+const request = http.request;
+const READ_CACHE_MS = 15_000;
+export const clearApiCache = http.clearCache;
+export const subscribeToApiChanges = http.subscribe;
 
 export async function login(email: string, password: string) {
   return request<{ token: string; user: User }>("/auth/login", {
@@ -98,12 +79,13 @@ export async function resetUserPassword(token: string, userId: number, password:
 }
 
 export async function getConsultantDashboard(token: string) {
-  return request<ConsultantDashboard>("/dashboard/consultant", {}, token);
+  return request<ConsultantDashboard>("/dashboard/consultant", {}, token, READ_CACHE_MS);
 }
 
 export async function getClients(
   token: string,
   params: { keyword?: string; stage?: string; status?: ClientStatus; overdue?: boolean; consultantId?: number | null } = {},
+  signal?: AbortSignal,
 ) {
   const search = new URLSearchParams();
   if (params.keyword) search.set("keyword", params.keyword);
@@ -112,7 +94,7 @@ export async function getClients(
   if (params.overdue) search.set("overdue", "true");
   if (params.consultantId) search.set("consultant_id", String(params.consultantId));
   const suffix = search.toString() ? `?${search.toString()}` : "";
-  return request<ClientListResponse>(`/clients${suffix}`, {}, token);
+  return request<ClientListResponse>(`/clients${suffix}`, { signal }, token);
 }
 
 export async function getClient(token: string, clientId: number) {
@@ -314,7 +296,7 @@ function withAnalyticsQuery(
 }
 
 export async function getAnalyticsOverview(token: string, consultantId?: number | null) {
-  return request<AnalyticsOverview>(`/analytics/overview${consultantQuery(consultantId)}`, {}, token);
+  return request<AnalyticsOverview>(`/analytics/overview${consultantQuery(consultantId)}`, {}, token, READ_CACHE_MS);
 }
 
 export async function getAnalyticsFunnel(
@@ -322,19 +304,19 @@ export async function getAnalyticsFunnel(
   consultantId?: number | null,
   range?: { startDate?: string; endDate?: string },
 ) {
-  return request<AnalyticsFunnel>(`/analytics/funnel${withAnalyticsQuery(consultantId, range)}`, {}, token);
+  return request<AnalyticsFunnel>(`/analytics/funnel${withAnalyticsQuery(consultantId, range)}`, {}, token, READ_CACHE_MS);
 }
 
 export async function getAnalyticsConsultants(token: string) {
-  return request<{ data: ConsultantAnalytics[] }>("/analytics/consultants", {}, token);
+  return request<{ data: ConsultantAnalytics[] }>("/analytics/consultants", {}, token, READ_CACHE_MS);
 }
 
 export async function getBarrierAnalytics(token: string, consultantId?: number | null) {
-  return request<{ data: BarrierAnalytics[] }>(`/analytics/barriers${consultantQuery(consultantId)}`, {}, token);
+  return request<{ data: BarrierAnalytics[] }>(`/analytics/barriers${consultantQuery(consultantId)}`, {}, token, READ_CACHE_MS);
 }
 
 export async function getAnalyticsRevenue(token: string, consultantId?: number | null) {
-  return request<AnalyticsRevenue>(`/analytics/revenue${consultantQuery(consultantId)}`, {}, token);
+  return request<AnalyticsRevenue>(`/analytics/revenue${consultantQuery(consultantId)}`, {}, token, READ_CACHE_MS);
 }
 
 export async function getStagnantClients(token: string, consultantId?: number | null, days = 14) {
@@ -342,5 +324,5 @@ export async function getStagnantClients(token: string, consultantId?: number | 
   if (consultantId) search.set("consultant_id", String(consultantId));
   search.set("days", String(days));
   search.set("limit", "10");
-  return request<ClientListResponse>(`/analytics/stagnant-clients?${search.toString()}`, {}, token);
+  return request<ClientListResponse>(`/analytics/stagnant-clients?${search.toString()}`, {}, token, READ_CACHE_MS);
 }

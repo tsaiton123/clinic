@@ -6,6 +6,7 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.client import Client
 from app.models.enums import ClientStatus, Stage, UserRole
+from app.models.follow_up_log import FollowUpLog
 from app.models.stage_log import StageLog
 from app.models.user import User
 from app.schemas import (
@@ -23,7 +24,7 @@ from app.services import (
     apply_client_filters,
     calculate_age,
     ensure_client_access,
-    latest_follow_up_for_client,
+    latest_follow_ups_for_clients,
     scoped_clients_query,
     validate_consultant,
 )
@@ -32,8 +33,7 @@ from app.services import (
 router = APIRouter(prefix="/clients", tags=["clients"])
 
 
-def client_list_item(db: Session, client: Client) -> ClientListItem:
-    latest_follow_up = latest_follow_up_for_client(db, client.id)
+def client_list_item(client: Client, latest_follow_up: FollowUpLog | None) -> ClientListItem:
     return ClientListItem(
         id=client.id,
         name=client.name,
@@ -76,7 +76,8 @@ def list_clients(
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     clients = db.scalars(query.order_by(Client.updated_at.desc()).offset((page - 1) * limit).limit(limit)).all()
 
-    items = [client_list_item(db, client) for client in clients]
+    latest_follow_ups = latest_follow_ups_for_clients(db, [client.id for client in clients])
+    items = [client_list_item(client, latest_follow_ups.get(client.id)) for client in clients]
     if overdue:
         from datetime import UTC, datetime
 
