@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import require_admin
@@ -10,7 +10,6 @@ from app.core.database import get_db
 from app.models.client import Client
 from app.models.enums import ClientStatus, Stage, UserRole
 from app.models.follow_up_log import FollowUpLog
-from app.models.stage_log import StageLog
 from app.models.user import User
 from app.schemas import (
     AnalyticsConsultantsResponse,
@@ -23,7 +22,11 @@ from app.schemas import (
     FunnelStageItem,
     RevenueTrendItem,
 )
-from app.services import days_overdue, latest_follow_up_for_client, validate_consultant
+from app.services import (
+    latest_follow_ups_for_clients,
+    latest_stage_times_for_clients,
+    validate_consultant,
+)
 from app.api.clients import client_list_item
 
 
@@ -77,20 +80,11 @@ def confirmed_value(client: Client) -> float:
     return float(client.actual_deal_value or client.estimated_value or 0)
 
 
-def latest_stage_log_created_at(db: Session, client_id: int) -> datetime | None:
-    return db.scalar(
-        select(StageLog.created_at)
-        .where(StageLog.client_id == client_id)
-        .order_by(StageLog.created_at.desc(), StageLog.id.desc())
-        .limit(1)
-    )
-
-
-def count_overdue_followups(db: Session, clients: list[Client]) -> int:
+def count_overdue_followups(clients: list[Client], latest_follow_ups: dict[int, FollowUpLog]) -> int:
     now = datetime.now(UTC)
     count = 0
     for client in clients:
-        latest = latest_follow_up_for_client(db, client.id)
+        latest = latest_follow_ups.get(client.id)
         if latest is None or latest.next_follow_up_at is None:
             continue
         due_at = latest.next_follow_up_at
@@ -101,13 +95,15 @@ def count_overdue_followups(db: Session, clients: list[Client]) -> int:
     return count
 
 
-def count_stagnant_clients(db: Session, clients: list[Client], days: int = 14) -> int:
+def count_stagnant_clients(
+    clients: list[Client], latest_stage_times: dict[int, datetime], days: int = 14
+) -> int:
     threshold = datetime.now(UTC) - timedelta(days=days)
     count = 0
     for client in clients:
         if client.current_stage == Stage.S6:
             continue
-        latest_stage_at = latest_stage_log_created_at(db, client.id)
+        latest_stage_at = latest_stage_times.get(client.id)
         if latest_stage_at is None:
             latest_stage_at = client.created_at
         if latest_stage_at.tzinfo is None:
@@ -117,20 +113,21 @@ def count_stagnant_clients(db: Session, clients: list[Client], days: int = 14) -
     return count
 
 
-def average_follow_up_gap_days(db: Session, consultant_id: int) -> float:
-    timestamps = db.scalars(
-        select(FollowUpLog.created_at)
-        .where(FollowUpLog.consultant_id == consultant_id)
-        .order_by(FollowUpLog.created_at.asc(), FollowUpLog.id.asc())
+def average_follow_up_gaps(db: Session) -> dict[int, float]:
+    rows = db.execute(
+        select(
+            FollowUpLog.consultant_id,
+            func.count(FollowUpLog.id),
+            func.min(FollowUpLog.created_at),
+            func.max(FollowUpLog.created_at),
+        ).group_by(FollowUpLog.consultant_id)
     ).all()
-    if len(timestamps) < 2:
-        return 0.0
-    gaps: list[float] = []
-    for previous, current in zip(timestamps, timestamps[1:]):
-        previous_at = previous if previous.tzinfo is not None else previous.replace(tzinfo=UTC)
-        current_at = current if current.tzinfo is not None else current.replace(tzinfo=UTC)
-        gaps.append((current_at - previous_at).total_seconds() / 86400)
-    return round(sum(gaps) / len(gaps), 1)
+    # Consecutive gaps telescope to last - first; avoid loading every timestamp.
+    return {
+        consultant_id: round((aware(last) - aware(first)).total_seconds() / 86400 / (count - 1), 1)
+        if count > 1 else 0.0
+        for consultant_id, count, first, last in rows
+    }
 
 
 @router.get("/overview", response_model=AnalyticsOverviewResponse)
@@ -157,6 +154,10 @@ def overview(
         if client.current_stage == Stage.S6 and period_start <= aware(client.updated_at) <= period_end
     )
     estimated_revenue = sum(estimated_value(client) for client in clients)
+    latest_follow_ups = latest_follow_ups_for_clients(db, [client.id for client in clients])
+    latest_stage_times = latest_stage_times_for_clients(
+        db, [client.id for client in clients if client.current_stage != Stage.S6]
+    )
 
     return AnalyticsOverviewResponse(
         total_clients=total_clients,
@@ -164,8 +165,8 @@ def overview(
         active_clients=active_clients,
         s6_clients_this_month=s6_clients,
         estimated_revenue=estimated_revenue,
-        overdue_followups=count_overdue_followups(db, clients),
-        stagnant_clients=count_stagnant_clients(db, clients),
+        overdue_followups=count_overdue_followups(clients, latest_follow_ups),
+        stagnant_clients=count_stagnant_clients(clients, latest_stage_times),
     )
 
 
@@ -217,13 +218,18 @@ def consultants(
     consultant_users = db.scalars(
         select(User).where(User.role == UserRole.consultant).order_by(User.id.asc())
     ).all()
+    clients_by_consultant: dict[int, list[Client]] = defaultdict(list)
+    all_clients = db.scalars(
+        active_clients_query().join(User, Client.assigned_consultant_id == User.id)
+        .where(User.role == UserRole.consultant)
+    ).all()
+    for client in all_clients:
+        clients_by_consultant[client.assigned_consultant_id].append(client)
+    latest_follow_ups = latest_follow_ups_for_clients(db, [client.id for client in all_clients])
+    follow_up_gaps = average_follow_up_gaps(db)
     data: list[ConsultantAnalyticsItem] = []
     for consultant in consultant_users:
-        clients = db.scalars(
-            active_clients_query()
-            .where(Client.assigned_consultant_id == consultant.id)
-            .options(selectinload(Client.assigned_consultant))
-        ).all()
+        clients = clients_by_consultant[consultant.id]
         distribution = stage_distribution(clients)
         total_clients = len(clients)
         s6_clients = distribution[Stage.S6.value]
@@ -236,8 +242,8 @@ def consultants(
                     1 for client in clients if period_start <= aware(client.created_at) <= period_end
                 ),
                 stage_distribution=distribution,
-                average_follow_up_gap_days=average_follow_up_gap_days(db, consultant.id),
-                overdue_followups=count_overdue_followups(db, clients),
+                average_follow_up_gap_days=follow_up_gaps.get(consultant.id, 0.0),
+                overdue_followups=count_overdue_followups(clients, latest_follow_ups),
                 s6_clients=s6_clients,
                 estimated_revenue=sum(estimated_value(client) for client in clients),
                 conversion_rate_s1_to_s6=round((s6_clients / total_clients) * 100, 1)
@@ -315,16 +321,23 @@ def stagnant_clients(
     clients = db.scalars(query).all()
 
     threshold = datetime.now(UTC) - timedelta(days=days)
+    latest_stage_times = latest_stage_times_for_clients(
+        db, [client.id for client in clients if client.current_stage != Stage.S6]
+    )
     stagnant: list[Client] = []
     for client in clients:
         if client.current_stage == Stage.S6:
             continue
-        latest_stage_at = latest_stage_log_created_at(db, client.id) or client.created_at
+        latest_stage_at = latest_stage_times.get(client.id) or client.created_at
         latest_stage_at = aware(latest_stage_at)
         if latest_stage_at < threshold:
             stagnant.append(client)
 
     stagnant.sort(
-        key=lambda client: aware(latest_stage_log_created_at(db, client.id) or client.created_at)
+        key=lambda client: aware(latest_stage_times.get(client.id) or client.created_at)
     )
-    return ClientSummaryResponse(data=[client_list_item(db, client) for client in stagnant[:limit]])
+    visible_clients = stagnant[:limit]
+    latest_follow_ups = latest_follow_ups_for_clients(db, [client.id for client in visible_clients])
+    return ClientSummaryResponse(
+        data=[client_list_item(client, latest_follow_ups.get(client.id)) for client in visible_clients]
+    )

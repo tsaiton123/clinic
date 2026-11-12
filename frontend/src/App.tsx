@@ -21,6 +21,7 @@ import {
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
   ApiError,
+  clearApiCache,
   archiveClient,
   createAdminNote,
   createBarrier,
@@ -56,10 +57,10 @@ import {
   updateUser,
   createUser,
 } from "./api";
+import { useApiQuery } from "./useApiQuery";
 import type {
   AdminNoteItem,
   AnalyticsFunnel,
-  AnalyticsOverview,
   AnalyticsRevenue,
   BarrierAnalytics,
   ClientDetail,
@@ -68,7 +69,6 @@ import type {
   ClientPayload,
   ClientStatus,
   ConsultantAnalytics,
-  ConsultantDashboard,
   ContactMethod,
   DecisionBarrier,
   FollowUpItem,
@@ -283,35 +283,45 @@ export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState<AppView>(initialLocation.view);
   const [selectedClientId, setSelectedClientId] = useState<number | null>(initialLocation.selectedClientId);
-  const [adminConsultants, setAdminConsultants] = useState<ConsultantAnalytics[]>([]);
   const [selectedConsultantId, setSelectedConsultantId] = useState<number | null>(initialLocation.selectedConsultantId);
   const [clientListPreset, setClientListPreset] = useState<ClientListPreset>(initialLocation.clientListPreset);
   const [authLoading, setAuthLoading] = useState(Boolean(token));
   const hasInitializedHistory = useRef(false);
+  const authenticatedToken = useRef<string | null>(null);
+  const consultantQuery = useApiQuery(
+    token && user?.role === "admin" ? `${token}:consultants:${view}` : null,
+    () => getAnalyticsConsultants(token!),
+  );
+  const adminConsultants = consultantQuery.data?.data ?? [];
 
   useEffect(() => {
     if (!token) {
       setAuthLoading(false);
       return;
     }
+    // Login already returns the authenticated user; restored sessions still use /me.
+    if (authenticatedToken.current === token) {
+      setAuthLoading(false);
+      return;
+    }
+    let active = true;
     me(token)
-      .then(setUser)
+      .then((nextUser) => { if (active) setUser(nextUser); })
       .catch(() => {
+        if (!active) return;
+        clearApiCache();
         localStorage.removeItem("clinic_token");
         setToken(null);
+        setUser(null);
       })
-      .finally(() => setAuthLoading(false));
+      .finally(() => { if (active) setAuthLoading(false); });
+    return () => { active = false; };
   }, [token]);
 
   useEffect(() => {
-    if (!token || user?.role !== "admin") {
-      setAdminConsultants([]);
+    if (!token || (user && user.role !== "admin")) {
       setSelectedConsultantId(null);
-      return;
     }
-    getAnalyticsConsultants(token)
-      .then((response) => setAdminConsultants(response.data))
-      .catch(() => setAdminConsultants([]));
   }, [token, user?.role]);
 
   useEffect(() => {
@@ -347,18 +357,22 @@ export function App() {
   }, [token, authLoading, view, selectedClientId, selectedConsultantId, clientListPreset]);
 
   function handleAuthenticated(nextToken: string, nextUser: User) {
+    clearApiCache();
+    authenticatedToken.current = nextToken;
     localStorage.setItem("clinic_token", nextToken);
     setToken(nextToken);
     setUser(nextUser);
+    setAuthLoading(false);
   }
 
   function logout() {
+    clearApiCache();
+    authenticatedToken.current = null;
     localStorage.removeItem("clinic_token");
     setToken(null);
     setUser(null);
     setSelectedClientId(null);
     setSelectedConsultantId(null);
-    setAdminConsultants([]);
     setClientListPreset({ key: 0 });
     hasInitializedHistory.current = false;
     window.history.replaceState(null, "", "/");
@@ -458,6 +472,7 @@ export function App() {
         </header>
 
         <div className="px-5 py-6 lg:px-8">
+          {consultantQuery.error && <InlineMessage tone="error">咨詢師資料：{consultantQuery.error}</InlineMessage>}
           {view === "dashboard" && (
             user.role === "admin" ? (
               <AdminDashboard
@@ -522,6 +537,15 @@ function ShellLoading() {
       <div className="h-10 w-10 animate-spin rounded-full border-2 border-ink/15 border-t-clinic" />
     </div>
   );
+}
+
+function QueryContent<T>({ query, children }: {
+  query: { data: T | null; error: string };
+  children: (data: T) => ReactNode;
+}) {
+  if (query.error) return <InlineMessage tone="error">{query.error}</InlineMessage>;
+  if (query.data === null) return <div role="status" className="py-6 text-sm text-ink/55">載入中...</div>;
+  return <>{children(query.data)}</>;
 }
 
 function LoginScreen({ onAuthenticated }: { onAuthenticated: (token: string, user: User) => void }) {
@@ -872,22 +896,13 @@ function UserManagementPage({ token, currentUser }: { token: string; currentUser
 }
 
 function Dashboard({ token, onOpenClient }: { token: string; onOpenClient: (id: number) => void }) {
-  const [data, setData] = useState<ConsultantDashboard | null>(null);
-  const [error, setError] = useState("");
+  const { data, error } = useApiQuery(`${token}:dashboard`, () => getConsultantDashboard(token));
   const [notificationError, setNotificationError] = useState("");
-
-  useEffect(() => {
-    getConsultantDashboard(token).then(setData).catch((err) => setError(err.message));
-  }, [token]);
 
   async function openNotification(notificationId: number, clientId?: number) {
     setNotificationError("");
     try {
       await markNotificationRead(token, notificationId);
-      setData((current) => current ? {
-        ...current,
-        unread_notifications: current.unread_notifications.filter((item) => item.id !== notificationId),
-      } : current);
       if (clientId) {
         onOpenClient(clientId);
       }
@@ -1068,42 +1083,20 @@ function AdminDashboard({
   onOpenClientList: (preset?: Omit<ClientListPreset, "key">) => void;
   onOpenClient: (id: number) => void;
 }) {
-  const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
-  const [funnel, setFunnel] = useState<AnalyticsFunnel | null>(null);
   const [funnelRange, setFunnelRange] = useState(defaultFunnelRange);
-  const [barriers, setBarriers] = useState<BarrierAnalytics[]>([]);
   const [comparedConsultantIds, setComparedConsultantIds] = useState<number[]>([]);
-  const [overdueItems, setOverdueItems] = useState<Array<{ client_id: number; client_name: string; current_stage: Stage; next_follow_up_at: string; overdue_days: number | null }>>([]);
-  const [stagnantItems, setStagnantItems] = useState<ClientListItem[]>([]);
-  const [error, setError] = useState("");
-  const [funnelError, setFunnelError] = useState("");
-
-  useEffect(() => {
-    Promise.all([
-      getAnalyticsOverview(token, selectedConsultantId),
-      getBarrierAnalytics(token, selectedConsultantId),
-      getOverdueFollowUps(token, { consultantId: selectedConsultantId, days: 1 }),
-      getStagnantClients(token, selectedConsultantId, 14),
-    ])
-      .then(([overviewData, barrierData, overdueData, stagnantData]) => {
-        setOverview(overviewData);
-        setBarriers(barrierData.data);
-        setOverdueItems(overdueData.data.slice(0, 6));
-        setStagnantItems(stagnantData.data);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "管理數據讀取失敗"));
-  }, [token, selectedConsultantId]);
-
-  useEffect(() => {
-    if (!isValidFunnelRange(funnelRange)) return;
-    setFunnelError("");
-    getAnalyticsFunnel(token, selectedConsultantId, {
+  const scope = `${token}:${selectedConsultantId ?? "all"}`;
+  const overviewQuery = useApiQuery(`${scope}:overview`, () => getAnalyticsOverview(token, selectedConsultantId));
+  const barrierQuery = useApiQuery(`${scope}:barriers`, () => getBarrierAnalytics(token, selectedConsultantId));
+  const overdueQuery = useApiQuery(`${scope}:overdue`, () => getOverdueFollowUps(token, { consultantId: selectedConsultantId, days: 1 }));
+  const stagnantQuery = useApiQuery(`${scope}:stagnant`, () => getStagnantClients(token, selectedConsultantId, 14));
+  const funnelQuery = useApiQuery(
+    isValidFunnelRange(funnelRange) ? `${scope}:funnel:${funnelRange.start}:${funnelRange.end}` : null,
+    () => getAnalyticsFunnel(token, selectedConsultantId, {
       startDate: funnelRange.start || undefined,
       endDate: funnelRange.end || undefined,
-    })
-      .then(setFunnel)
-      .catch((err) => setFunnelError(err instanceof Error ? err.message : "Funnel 讀取失敗"));
-  }, [token, selectedConsultantId, funnelRange]);
+    }),
+  );
 
   useEffect(() => {
     if (selectedConsultantId) {
@@ -1116,9 +1109,6 @@ function AdminDashboard({
     });
   }, [selectedConsultantId, consultants]);
 
-  if (error) return <ErrorPanel message={error} />;
-  if (!overview || !funnel) return <ShellLoading />;
-
   const selectedConsultant = consultants.find((item) => item.consultant_id === selectedConsultantId);
   const visibleConsultants = selectedConsultantId
     ? consultants.filter((item) => item.consultant_id === selectedConsultantId)
@@ -1129,37 +1119,36 @@ function AdminDashboard({
       <section className="space-y-4">
         <div className="rounded-lg border border-ink/10 bg-porcelain p-4 shadow-panel">
           <div className="text-xs uppercase tracking-[0.16em] text-moss">Current Scope</div>
-          <div className="mt-1 font-display text-3xl">{selectedConsultant ? selectedConsultant.consultant_name : "全診所"}</div>
+          <div className="mt-1 font-display text-3xl">{selectedConsultantId ? selectedConsultant?.consultant_name ?? "咨詢師資料載入中…" : "全診所"}</div>
         </div>
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <QueryContent query={overviewQuery}>{(overview) => <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard icon={<UserRound />} label="總客戶數" value={overview.total_clients} tone="moss" onClick={() => onOpenClientList()} />
           <MetricCard icon={<Plus />} label="本月新增" value={overview.new_clients_this_month} tone="clinic" onClick={() => onOpenClientList()} />
           <MetricCard icon={<CircleDollarSign />} label="本月 S6" value={overview.s6_clients_this_month} tone="brass" onClick={() => onOpenClientList({ stage: "S6" })} />
           <MetricCard icon={<AlertTriangle />} label="逾期追蹤" value={overview.overdue_followups} tone="oxide" onClick={() => onOpenClientList({ overdue: true })} />
-        </section>
+        </section>}</QueryContent>
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
         <Panel title="S1-S6 Funnel" icon={<Filter size={18} />}>
           <FunnelDateRangeFilter value={funnelRange} onChange={setFunnelRange} />
-          {funnelError ? <div className="mt-3 text-sm text-oxide">{funnelError}</div> : null}
-          <AdminFunnel funnel={funnel} />
+          {isValidFunnelRange(funnelRange) && <QueryContent query={funnelQuery}>{(funnel) => <AdminFunnel funnel={funnel} />}</QueryContent>}
         </Panel>
         <Panel title="營運訊號" icon={<Activity size={18} />}>
-          <div className="grid gap-3 sm:grid-cols-2">
+          <QueryContent query={overviewQuery}>{(overview) => <div className="grid gap-3 sm:grid-cols-2">
             <SignalBlock label="活躍客戶" value={overview.active_clients.toLocaleString()} onClick={() => onOpenClientList({ status: "active" })} />
             <SignalBlock label="長時間未推進" value={overview.stagnant_clients.toLocaleString()} tone={overview.stagnant_clients > 0 ? "risk" : "normal"} />
             <SignalBlock label="預估營收" value={money(overview.estimated_revenue)} wide />
-          </div>
+          </div>}</QueryContent>
         </Panel>
       </section>
 
       <section className="grid gap-6 xl:grid-cols-2">
         <Panel title="逾期追蹤名單" icon={<AlertTriangle size={18} />}>
-          <DueList items={overdueItems} empty="目前沒有逾期追蹤" onOpenClient={onOpenClient} />
+          <QueryContent query={overdueQuery}>{(result) => <DueList items={result.data.slice(0, 6)} empty="目前沒有逾期追蹤" onOpenClient={onOpenClient} />}</QueryContent>
         </Panel>
         <Panel title="長時間未推進名單" icon={<Clock3 size={18} />}>
-          <ClientMiniList clients={stagnantItems} empty="目前沒有停滯客戶" onOpenClient={onOpenClient} />
+          <QueryContent query={stagnantQuery}>{(result) => <ClientMiniList clients={result.data} empty="目前沒有停滯客戶" onOpenClient={onOpenClient} />}</QueryContent>
         </Panel>
       </section>
 
@@ -1179,7 +1168,7 @@ function AdminDashboard({
           <ConsultantPerformanceTable consultants={visibleConsultants} />
         </Panel>
         <Panel title="Decision Barrier Analysis" icon={<AlertTriangle size={18} />}>
-          <BarrierBars barriers={barriers} />
+          <QueryContent query={barrierQuery}>{(result) => <BarrierBars barriers={result.data} />}</QueryContent>
         </Panel>
       </section>
     </div>
@@ -1195,68 +1184,42 @@ function AnalyticsPage({
   consultants: ConsultantAnalytics[];
   selectedConsultantId: number | null;
 }) {
-  const [funnel, setFunnel] = useState<AnalyticsFunnel | null>(null);
   const [funnelRange, setFunnelRange] = useState(defaultFunnelRange);
-  const [consultantRows, setConsultantRows] = useState<ConsultantAnalytics[]>([]);
-  const [barriers, setBarriers] = useState<BarrierAnalytics[]>([]);
-  const [revenue, setRevenue] = useState<AnalyticsRevenue | null>(null);
-  const [error, setError] = useState("");
-  const [funnelError, setFunnelError] = useState("");
-
-  useEffect(() => {
-    Promise.all([
-      getBarrierAnalytics(token, selectedConsultantId),
-      getAnalyticsRevenue(token, selectedConsultantId),
-      getAnalyticsConsultants(token),
-    ])
-      .then(([barrierData, revenueData, consultantData]) => {
-        setBarriers(barrierData.data);
-        setRevenue(revenueData);
-        setConsultantRows(
-          selectedConsultantId
-            ? consultantData.data.filter((item) => item.consultant_id === selectedConsultantId)
-            : consultantData.data,
-        );
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "Analytics 讀取失敗"));
-  }, [token, selectedConsultantId]);
-
-  useEffect(() => {
-    if (!isValidFunnelRange(funnelRange)) return;
-    setFunnelError("");
-    getAnalyticsFunnel(token, selectedConsultantId, {
+  const consultantRows = selectedConsultantId
+    ? consultants.filter((item) => item.consultant_id === selectedConsultantId)
+    : consultants;
+  const scope = `${token}:${selectedConsultantId ?? "all"}`;
+  const barrierQuery = useApiQuery(`${scope}:barriers`, () => getBarrierAnalytics(token, selectedConsultantId));
+  const revenueQuery = useApiQuery(`${scope}:revenue`, () => getAnalyticsRevenue(token, selectedConsultantId));
+  const funnelQuery = useApiQuery(
+    isValidFunnelRange(funnelRange) ? `${scope}:funnel:${funnelRange.start}:${funnelRange.end}` : null,
+    () => getAnalyticsFunnel(token, selectedConsultantId, {
       startDate: funnelRange.start || undefined,
       endDate: funnelRange.end || undefined,
-    })
-      .then(setFunnel)
-      .catch((err) => setFunnelError(err instanceof Error ? err.message : "Funnel 讀取失敗"));
-  }, [token, selectedConsultantId, funnelRange]);
-
-  if (error) return <ErrorPanel message={error} />;
-  if (!funnel || !revenue) return <ShellLoading />;
+    }),
+  );
 
   return (
     <div className="space-y-6">
-      <section className="grid gap-4 md:grid-cols-3">
+      <QueryContent query={revenueQuery}>{(revenue) => <section className="grid gap-4 md:grid-cols-3">
         <MetricCard icon={<CircleDollarSign />} label="預估營收" value={Math.round(revenue.estimated_revenue)} tone="brass" />
         <MetricCard icon={<ShieldCheck />} label="已確認營收" value={Math.round(revenue.confirmed_revenue)} tone="clinic" />
         <MetricCard icon={<Activity />} label="趨勢月份" value={revenue.data.length} tone="moss" />
-      </section>
+      </section>}</QueryContent>
 
       <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <Panel title="Revenue Trend" icon={<CircleDollarSign size={18} />}>
-          <RevenueTrendChart revenue={revenue} />
+          <QueryContent query={revenueQuery}>{(revenue) => <RevenueTrendChart revenue={revenue} />}</QueryContent>
         </Panel>
         <Panel title="Decision Barrier Analysis" icon={<AlertTriangle size={18} />}>
-          <BarrierBars barriers={barriers} />
+          <QueryContent query={barrierQuery}>{(result) => <BarrierBars barriers={result.data} />}</QueryContent>
         </Panel>
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         <Panel title="S1-S6 Funnel" icon={<Filter size={18} />}>
           <FunnelDateRangeFilter value={funnelRange} onChange={setFunnelRange} />
-          {funnelError ? <div className="mt-3 text-sm text-oxide">{funnelError}</div> : null}
-          <AdminFunnel funnel={funnel} />
+          {isValidFunnelRange(funnelRange) && <QueryContent query={funnelQuery}>{(funnel) => <AdminFunnel funnel={funnel} />}</QueryContent>}
         </Panel>
         <Panel title="Consultant Performance" icon={<UserRound size={18} />}>
           <ConsultantPerformanceTable consultants={consultantRows} />
@@ -1295,13 +1258,19 @@ function AdminNotificationComposer({
     if (!receiverId) {
       setClients([]);
       setClientId("");
+      setLoadingClients(false);
       return;
     }
+    const controller = new AbortController();
     setLoadingClients(true);
-    getClients(token, { consultantId: receiverId })
-      .then((response) => setClients(response.data.filter((client) => client.client_status !== "archived")))
-      .catch(() => setClients([]))
-      .finally(() => setLoadingClients(false));
+    setClientId("");
+    getClients(token, { consultantId: receiverId }, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) setClients(response.data.filter((client) => client.client_status !== "archived"));
+      })
+      .catch(() => { if (!controller.signal.aborted) setClients([]); })
+      .finally(() => { if (!controller.signal.aborted) setLoadingClients(false); });
+    return () => controller.abort();
   }, [token, receiverId]);
 
   async function submit(event: FormEvent) {
@@ -1723,6 +1692,7 @@ function ClientListView({
 }) {
   const [clients, setClients] = useState<ClientListItem[]>([]);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [stage, setStage] = useState("");
   const [status, setStatus] = useState<ClientStatus | "">("");
   const [overdue, setOverdue] = useState(false);
@@ -1730,20 +1700,38 @@ function ClientListView({
   const [showCreate, setShowCreate] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [archiveError, setArchiveError] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedKeyword(keyword), 300);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
 
   useEffect(() => {
     setStage(preset.stage ?? "");
     setStatus(preset.status ?? "");
     setOverdue(Boolean(preset.overdue));
     setKeyword("");
+    setDebouncedKeyword("");
   }, [preset.key]);
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
-    getClients(token, { keyword, stage, status: status || undefined, overdue, consultantId })
-      .then((response) => setClients(response.data))
-      .finally(() => setLoading(false));
-  }, [token, keyword, stage, status, overdue, consultantId, reloadKey]);
+    setLoadError("");
+    getClients(token, { keyword: debouncedKeyword, stage, status: status || undefined, overdue, consultantId }, controller.signal)
+      .then((response) => { if (!controller.signal.aborted) setClients(response.data); })
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          setClients([]);
+          setLoadError(err instanceof Error ? err.message : "客戶列表讀取失敗");
+        }
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [token, debouncedKeyword, stage, status, overdue, consultantId, reloadKey]);
+
+  const listLoading = loading || keyword !== debouncedKeyword;
 
   async function archiveFromList(clientId: number) {
     if (!window.confirm("確定要封存這位客戶？封存後不會出現在一般列表中。")) return;
@@ -1820,6 +1808,7 @@ function ClientListView({
       </div>
 
       {archiveError && <InlineMessage tone="error">{archiveError}</InlineMessage>}
+      {loadError && <InlineMessage tone="error">{loadError}</InlineMessage>}
 
       <div className="overflow-hidden rounded-lg border border-ink/10 bg-porcelain shadow-panel">
         <div className="grid grid-cols-[1fr_120px_150px_120px_90px] border-b border-ink/10 px-4 py-3 text-xs uppercase tracking-[0.14em] text-ink/45 max-md:hidden">
@@ -1829,9 +1818,9 @@ function ClientListView({
           <div>預估金額</div>
           <div>操作</div>
         </div>
-        {loading && <div className="p-6 text-sm text-ink/55">載入中...</div>}
-        {!loading && clients.length === 0 && <div className="p-6 text-sm text-ink/55">沒有符合條件的客戶</div>}
-        {!loading && clients.map((client) => (
+        {listLoading && <div className="p-6 text-sm text-ink/55">載入中...</div>}
+        {!listLoading && !loadError && clients.length === 0 && <div className="p-6 text-sm text-ink/55">沒有符合條件的客戶</div>}
+        {!listLoading && clients.map((client) => (
           <div key={client.id} className="grid grid-cols-1 items-center gap-3 border-b border-ink/5 px-4 py-4 last:border-b-0 hover:bg-paper md:grid-cols-[1fr_120px_150px_120px_90px]">
             <div>
               <div className="font-semibold">{client.name}</div>
